@@ -1,0 +1,410 @@
+name: Risk Tier Classifier
+
+# Classifies every PR as Trivial / Lite / Full from diff stats + sensitive-path
+# globs, applies a `tier:*` label, and posts a sticky `<!-- pr-tier -->` comment
+# with its reasoning. Downstream review workflows gate on the `tier:trivial`
+# label to skip themselves on small low-risk PRs.
+#
+# The tier thresholds and the sensitive-path list are NOT restated in this
+# header. The Compute tier step is authoritative: SENSITIVE_REGEX cannot drift —
+# it IS the pattern that is grepped. The `RULE=` strings are only ADJACENT to
+# their gates; nothing derives them, so they can and do drift. Prose:
+# tier-classify/README.md.
+#
+# ADOPT ME
+# ────────
+# Repository variables, all optional — the defaults are sane for both monorepos
+# and single-package repos:
+#   TIER_SENSITIVE_REGEX      always-Full paths (extended regex, one path/line)
+#   TIER_WORKSPACE_ROOTS      alternation of monorepo roots (default: apps|packages)
+#   TIER_DEPLOY_CONFIG_REGEX  infra/deploy files that block the Trivial tier
+# In a single-package repo the workspace count is simply always 0, so the
+# workspace gates are inert — nothing to configure.
+#
+# Race-window safety
+# ──────────────────
+# pull_request.opened fires multiple workflows in parallel; this one may not
+# finish before the review workflows check labels. Downstream workflows DEFAULT
+# TO RUN when the label is absent — worst case a few trivial PRs get reviewed
+# before the label catches up. Acceptable cost; the opposite default would mean
+# silently skipping review on a real PR.
+#
+# Concurrency: cancel-in-progress: true is correct HERE (unlike the comment-
+# writing workflows). Tier classification is idempotent — a later commit's run
+# supersedes the prior one's. Cancellation loses no data.
+#
+# Fork PRs
+# ────────
+# GitHub forces GITHUB_TOKEN to read-only on `pull_request` from a fork, whatever
+# the permissions block above says. So the label and comment steps are guarded on
+# the head repo being this repo; on a fork they skip and the run stays green, with
+# the computed tier printed to the log. The alternative — `pull_request_target` —
+# would run this against a fork's code with a writable token, which is the exact
+# hole the sibling workflows use `workflow_run` to avoid. Not worth a label.
+#
+# The compute step still runs on forks: it is read-only, and its log line is the
+# useful part. Downstream review workflows DEFAULT TO RUN when the label is
+# absent, so a fork PR gets the full review rather than being silently skipped.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read           # checkout for git diff
+  pull-requests: write     # label edit + comment upsert
+  issues: write            # PR comments use the issues API under the hood
+
+concurrency:
+  group: tier-classify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: Classify PR risk tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+      TIER_SENSITIVE_REGEX: ${{ vars.TIER_SENSITIVE_REGEX }}
+      TIER_WORKSPACE_ROOTS: ${{ vars.TIER_WORKSPACE_ROOTS }}
+      TIER_DEPLOY_CONFIG_REGEX: ${{ vars.TIER_DEPLOY_CONFIG_REGEX }}
+
+    steps:
+      # ── 1. Checkout with full history so git diff works ─────────────────
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Belt-and-braces refresh, NOT the guarantee — `fetch-depth: 0` above
+      # already brings the base branch's full history, so the merge base is
+      # present before this runs. Hence `|| true`: this step is allowed to fail,
+      # and a genuinely absent merge base still fail-closes to Full via DIFF_OK=0.
+      #
+      # NEVER add --depth=1 — it grafts a shallow boundary onto a complete repo
+      # and hides the merge base. History: tier-classify/README.md. stderr is
+      # kept (no 2>/dev/null) so the log explains WHY a PR fail-closed.
+      - name: Fetch base ref
+        run: git fetch --no-tags origin "$BASE_SHA" || true
+
+      # ── 2. Compute tier from diff ───────────────────────────────────────
+      - name: Compute tier
+        id: tier
+        run: |
+          set -euo pipefail
+
+          # Three-dot (BASE...HEAD) diffs HEAD against the MERGE BASE, which is
+          # what GitHub reports for the PR. Two-dot compares the two endpoints,
+          # so a branch behind the base absorbs the base's commits and the tier
+          # becomes a function of branch staleness rather than PR content — a
+          # small PR on a stale branch classifies Full, and worse, its reported
+          # size is someone else's work.
+          #
+          # `-z` because git C-quotes paths holding non-ASCII, backslash, tab or
+          # control chars, and the leading `"` defeats every ^-anchored
+          # classifier. A non-zero `git diff` must FAIL-CLOSED to Full, never
+          # read as "empty".
+          #
+          # `pipefail` (set above) is LOAD-BEARING for the two piped diffs below:
+          # without it the pipeline reports `tr`'s exit 0 and a failed `git diff`
+          # sails past `|| DIFF_OK=0` into a silent fail-OPEN. Do not remove it,
+          # and do not add a piped diff without it.
+          #
+          # Coupled: `-z` also drops git's quoting of newline-bearing paths,
+          # which then split into two lines. That is safe only because the
+          # changed_files cross-check below catches the inflated count and fails
+          # closed. Neither the unquoting nor that cross-check can be removed alone.
+          DIFF_OK=1
+          DIFF_STAT=$(git diff --shortstat "$BASE_SHA...$HEAD_SHA") || DIFF_OK=0
+          CHANGED=$(git diff -z --name-only "$BASE_SHA...$HEAD_SHA" | tr '\0' '\n') || DIFF_OK=0
+
+          # Rename-BLIND view: with detection on, `--name-only` emits only the
+          # rename destination, hiding a sensitive source path. EVERY classifier
+          # below reads this; only LOCAL_FILE_COUNT reads $CHANGED, because it
+          # must match changed_files, which counts a rename as one file.
+          CHANGED_NO_RENAMES=$(git diff -z --name-only --no-renames "$BASE_SHA...$HEAD_SHA" | tr '\0' '\n') || DIFF_OK=0
+
+          INSERTIONS=$(echo "$DIFF_STAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+          DELETIONS=$(echo "$DIFF_STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+          INSERTIONS=${INSERTIONS:-0}
+          DELETIONS=${DELETIONS:-0}
+          LOC=$((INSERTIONS + DELETIONS))
+
+          # Cross-check the local diff against GitHub's changed_files. Under
+          # three-dot the two measure the same thing, so ANY disagreement means
+          # the diff is untrustworthy and must not drive the tier.
+          #
+          # The equality holds only while rename detection is ON — GitHub counts
+          # a rename as one file, and so does `--name-only` under the default
+          # diff.renames=true (git >= 2.9).
+          LOCAL_FILE_COUNT=$(echo "$CHANGED" | grep -cE '.' || true)
+          LOCAL_FILE_COUNT=${LOCAL_FILE_COUNT:-0}
+
+          # Validate, don't sanitise. A non-numeric operand makes `[ x -ne N ]`
+          # print "integer expected" and evaluate FALSE without aborting under
+          # set -e, silently skipping the fail-safe. Unreachable today —
+          # changed_files is a schema-guaranteed non-negative integer on
+          # pull_request — so this is defence-in-depth, not a live fix.
+          # `-0` not `:-0`: unset defaults to 0, but an EMPTY value falls through
+          # to the '' arm below and fails closed, rather than being coerced to a
+          # valid 0.
+          API_FILE_COUNT=${CHANGED_FILES-0}
+          API_COUNT_VALID=1
+          case "$API_FILE_COUNT" in
+            ''|*[!0-9]*) API_COUNT_VALID=0 ;;
+          esac
+
+          # Never echo an unvalidated SCALAR into GITHUB_OUTPUT. Rejecting the
+          # input is not enough: the RULE string below is written with a bare
+          # `echo`, so a newline in it forges a whole output line, and a later
+          # `tier=` would then win over the real one — a sensitive PR could
+          # resolve to trivial. The runner splits on \n, never a lone \r.
+          # API_COUNT_DISPLAY is the containment; API_COUNT_VALID is only the
+          # rejection. Both are needed. (WORKSPACE_LIST is the other
+          # path-derived value reaching an output; see its `paste` call.)
+          API_COUNT_DISPLAY="$API_FILE_COUNT"
+          [ "$API_COUNT_VALID" -eq 0 ] && API_COUNT_DISPLAY="(not a number)"
+
+          DIFF_BROKEN=0
+          if [ "$DIFF_OK" -eq 0 ] || [ "$API_COUNT_VALID" -eq 0 ]; then
+            DIFF_BROKEN=1
+          elif [ "$API_FILE_COUNT" -ne "$LOCAL_FILE_COUNT" ]; then
+            DIFF_BROKEN=1
+          fi
+
+          # Sensitive-path detection (extended regex; one path per line).
+          #
+          # The crypto/webhook/auth clause matches the stem as a DIRECTORY at any
+          # depth, or anywhere in a basename provided it is separator-delimited —
+          # so `auth.ts`, `service-auth.ts` and `stripe-webhooks.ts` match while
+          # `author.ts` and `oauthLib.ts` do not. Both halves are load-bearing: a
+          # directory-only form misses auth code that lives in files, and a form
+          # without the separator sweeps in every `author.ts`.
+          #
+          # `.github/` is matched wholesale AND at any depth, not as a
+          # `^`-anchored subdirectory list. A subdirectory list omits whichever
+          # directory is added next — including this pipeline's own — and
+          # `^`-anchoring misses nested `.github/` directories. Both mistakes let
+          # a PR edit the reviewer's own prompt and score Trivial, skipping the
+          # reviewer. Which files match is asserted in tier-classify.test.sh.
+          SENSITIVE_REGEX='(^|/)\.github/|(^|/)([^/]*[-_.])?(crypto|webhooks?|auth)(/|([-_.][^/]*)?\.[jt]sx?$)|(^|/)secret[^/]*\.[jt]s$|\.sql$'
+          if [ -n "${TIER_SENSITIVE_REGEX:-}" ]; then SENSITIVE_REGEX="$TIER_SENSITIVE_REGEX"; fi
+          SENSITIVE_HITS=$(echo "$CHANGED_NO_RENAMES" | grep -cE "$SENSITIVE_REGEX" || true)
+          SENSITIVE_HITS=${SENSITIVE_HITS:-0}
+
+          # Infra / deploy descriptors always block the Trivial tier: a one-line
+          # change to one of these is not a one-line change to production.
+          DEPLOY_CONFIG_REGEX='(^|/)(wrangler\.(json|jsonc|toml)|Dockerfile|docker-compose\.ya?ml|[^/]+\.tf|serverless\.ya?ml|fly\.toml)$'
+          if [ -n "${TIER_DEPLOY_CONFIG_REGEX:-}" ]; then DEPLOY_CONFIG_REGEX="$TIER_DEPLOY_CONFIG_REGEX"; fi
+
+          # Monorepo roots whose first path segment names a workspace. In a
+          # single-package repo nothing matches and WORKSPACES is 0, which makes
+          # every workspace gate inert — the intended non-monorepo behaviour.
+          WORKSPACE_ROOTS='apps|packages'
+          if [ -n "${TIER_WORKSPACE_ROOTS:-}" ]; then WORKSPACE_ROOTS="$TIER_WORKSPACE_ROOTS"; fi
+
+          # Workspace count: first segment under one of the workspace roots.
+          # `#` is the sed s-command delimiter so the alternation can use a
+          # literal `|`.
+          WORKSPACES=$(echo "$CHANGED_NO_RENAMES" \
+            | sed -nE "s#^($WORKSPACE_ROOTS)/([^/]+)/.*#\2#p" \
+            | sort -u | wc -l | tr -d ' ')
+          WORKSPACES=${WORKSPACES:-0}
+
+          # Manifest / deploy-config / migration presence (Trivial blockers)
+          HAS_PKG_BUMP=$(echo "$CHANGED_NO_RENAMES" | grep -cE '(^|/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock(b)?|requirements\.txt|go\.mod|Cargo\.(toml|lock))$' || true)
+          HAS_DEPLOY_CFG=$(echo "$CHANGED_NO_RENAMES" | grep -cE "$DEPLOY_CONFIG_REGEX" || true)
+          HAS_SQL=$(echo "$CHANGED_NO_RENAMES" | grep -cE '\.sql$' || true)
+          HAS_PKG_BUMP=${HAS_PKG_BUMP:-0}
+          HAS_DEPLOY_CFG=${HAS_DEPLOY_CFG:-0}
+          HAS_SQL=${HAS_SQL:-0}
+
+          # Pretty workspace list for the comment. Same delimiter fix as above.
+          # Sanitize markdown control chars in case a workspace ever has them
+          # (`|` would break the table column; `]` could enable link injection).
+          #
+          # `paste -s` serialises every match onto ONE line; sed's per-line
+          # pattern space means `[^/]+` cannot capture a newline either. The
+          # `tr -d` scrub is NOT what protects this — it strips control chars,
+          # not `=`, so it cannot stop a forged key on its own.
+          WORKSPACE_LIST=$(echo "$CHANGED_NO_RENAMES" \
+            | sed -nE "s#^($WORKSPACE_ROOTS)/([^/]+)/.*#\1/\2#p" \
+            | sort -u | head -5 | paste -sd ', ' - \
+            | tr -d '|][`\r')
+          # `\r` is hygiene, not a bypass fix: the Actions runner splits
+          # GITHUB_OUTPUT on \n only, so a lone CR cannot forge a line. But `-z`
+          # above is what lets CR-bearing paths reach this value at all, so
+          # stripping it here is this step's own obligation and defends any
+          # consumer that does split on CR.
+          WORKSPACE_LIST=${WORKSPACE_LIST:-"(none)"}
+
+          # Tier decision. Uses LOC (ins+del) for the Trivial gate, INSERTIONS
+          # alone for the Lite gate — reviewable surface area tracks insertions
+          # on multi-thousand-line refactors.
+          if [ "$DIFF_BROKEN" -eq 1 ]; then
+            # FAIL-CLOSED: the diff failed, changed_files was not a number, or
+            # the counts disagree. The size signals cannot be trusted, so take
+            # the safest tier rather than let a wrong diff masquerade as Trivial
+            # and skip every review surface.
+            TIER="full"
+            RULE="Full (fail-safe: git diff failed, or changed_files was not a number, or it disagrees with the local count -- changed_files=$API_COUNT_DISPLAY vs local=$LOCAL_FILE_COUNT)"
+          elif [ "$SENSITIVE_HITS" -gt 0 ] || [ "$WORKSPACES" -gt 2 ]; then
+            TIER="full"
+            RULE="Full (sensitive path touched or >2 workspaces)"
+          elif [ "$LOC" -le 10 ] \
+               && [ "$HAS_PKG_BUMP" -eq 0 ] \
+               && [ "$HAS_DEPLOY_CFG" -eq 0 ] \
+               && [ "$HAS_SQL" -eq 0 ]; then
+            TIER="trivial"
+            RULE="Trivial (<=10 LoC churn, no sensitive paths, no manifest/lockfile/deploy-config/*.sql change)"
+          # `-le 2` is redundant while the branch above routes `-gt 2` to Full.
+          # If that threshold widens, revisit the RULE strings: cases would then
+          # fall through to the default-Full string, which no longer names
+          # workspaces.
+          elif [ "$INSERTIONS" -le 100 ] && [ "$WORKSPACES" -le 2 ]; then
+            TIER="lite"
+            RULE="Lite (<=100 insertions, <=2 workspaces, no sensitive paths)"
+          else
+            TIER="full"
+            RULE="Full (default -- > 100 insertions)"
+          fi
+
+          echo "tier=$TIER"             >> "$GITHUB_OUTPUT"
+          echo "rule=$RULE"             >> "$GITHUB_OUTPUT"
+          echo "insertions=$INSERTIONS" >> "$GITHUB_OUTPUT"
+          echo "deletions=$DELETIONS"   >> "$GITHUB_OUTPUT"
+          echo "workspaces=$WORKSPACES" >> "$GITHUB_OUTPUT"
+          echo "workspace_list=$WORKSPACE_LIST" >> "$GITHUB_OUTPUT"
+          echo "sensitive_hits=$SENSITIVE_HITS" >> "$GITHUB_OUTPUT"
+          echo "has_pkg_bump=$HAS_PKG_BUMP"     >> "$GITHUB_OUTPUT"
+          echo "has_deploy_cfg=$HAS_DEPLOY_CFG" >> "$GITHUB_OUTPUT"
+          echo "has_sql=$HAS_SQL"               >> "$GITHUB_OUTPUT"
+
+          echo "[tier-classify] tier=$TIER insertions=$INSERTIONS workspaces=$WORKSPACES sensitive_hits=$SENSITIVE_HITS"
+
+      # ── 3. Ensure labels exist (idempotent) ─────────────────────────────
+      # `--force` updates colour and description when the label already exists.
+      # Without it `gh label create` fails, `|| true` swallows the failure, and
+      # descriptions become write-once — an edited description here never reaches
+      # GitHub and the label text drifts from the rule it documents.
+      - name: Ensure tier labels exist
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          gh label create --force tier:trivial --repo "$GH_REPO" --color 0E8A16 --description "<=10 LoC churn, no sensitive paths, no manifest/deploy-config/*.sql" 2>/dev/null || true
+          gh label create --force tier:lite    --repo "$GH_REPO" --color FBCA04 --description "<=100 insertions, <=2 workspaces, no sensitive paths"                2>/dev/null || true
+          gh label create --force tier:full    --repo "$GH_REPO" --color D93F0B --description "default -- full review surface fires"                               2>/dev/null || true
+
+      # ── 4. Apply label (idempotent — remove others, add current) ────────
+      - name: Apply tier label
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          TIER: ${{ steps.tier.outputs.tier }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json labels --jq '[.labels[].name] | map(select(startswith("tier:"))) | .[]' || true)
+          NEW="tier:$TIER"
+
+          # Remove every tier:* label that isn't the new one
+          for L in $CURRENT; do
+            if [ "$L" != "$NEW" ]; then
+              gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$L" || true
+            fi
+          done
+
+          gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$NEW"
+
+      # ── 5. Upsert sticky reasoning comment ──────────────────────────────
+      - name: Upsert tier comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          TIER: ${{ steps.tier.outputs.tier }}
+          RULE: ${{ steps.tier.outputs.rule }}
+          INSERTIONS: ${{ steps.tier.outputs.insertions }}
+          DELETIONS: ${{ steps.tier.outputs.deletions }}
+          WORKSPACES: ${{ steps.tier.outputs.workspaces }}
+          WORKSPACE_LIST: ${{ steps.tier.outputs.workspace_list }}
+          SENSITIVE_HITS: ${{ steps.tier.outputs.sensitive_hits }}
+          HAS_PKG_BUMP: ${{ steps.tier.outputs.has_pkg_bump }}
+          HAS_DEPLOY_CFG: ${{ steps.tier.outputs.has_deploy_cfg }}
+          HAS_SQL: ${{ steps.tier.outputs.has_sql }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- pr-tier -->'
+
+          case "$TIER" in
+            trivial)
+              EMOJI="🟢"; TIER_DISPLAY="TRIVIAL"
+              REVIEW_NOTE="skipped (Trivial-tier)"
+              ;;
+            lite)
+              EMOJI="🟡"; TIER_DISPLAY="LITE"
+              REVIEW_NOTE="will run"
+              ;;
+            full|*)
+              EMOJI="🔴"; TIER_DISPLAY="FULL"
+              REVIEW_NOTE="will run"
+              ;;
+          esac
+
+          TRIGGERS=""
+          [ "$SENSITIVE_HITS" -gt 0 ] && TRIGGERS="${TRIGGERS}sensitive path ($SENSITIVE_HITS hits), "
+          [ "$HAS_PKG_BUMP"   -gt 0 ] && TRIGGERS="${TRIGGERS}manifest/lockfile change, "
+          [ "$HAS_DEPLOY_CFG" -gt 0 ] && TRIGGERS="${TRIGGERS}deploy-config change, "
+          [ "$HAS_SQL"        -gt 0 ] && TRIGGERS="${TRIGGERS}*.sql migration, "
+          TRIGGERS=${TRIGGERS%, }
+          TRIGGERS=${TRIGGERS:-"none"}
+
+          # Build the comment body as a printf chain. NOT a heredoc — heredoc
+          # body lines must start at column 1, which would break out of the YAML
+          # `run: |` block scalar's indentation.
+          {
+            printf '%s\n\n' "$MARKER"
+            printf '## %s Risk Tier: **%s**\n\n' "$EMOJI" "$TIER_DISPLAY"
+            printf "Computed from this PR's diff against its merge base.\n\n"
+            printf '| Signal | Value |\n'
+            printf '|--------|-------|\n'
+            printf '| Insertions | %s |\n' "$INSERTIONS"
+            printf '| Deletions | %s |\n' "$DELETIONS"
+            printf '| Workspaces affected | %s (%s) |\n' "$WORKSPACES" "$WORKSPACE_LIST"
+            printf '| Always-Full triggers | %s |\n\n' "$TRIGGERS"
+            printf '**Decision rule fired:** `%s`\n\n' "$RULE"
+            printf 'Downstream: pre-pr-review — %s.\n\n' "$REVIEW_NOTE"
+            printf 'Override: `gh pr edit %s --add-label tier:full` -- manual labels are respected by downstream workflows until the next push re-runs this job.\n\n' "$PR_NUMBER"
+            printf -- '---\n\n'
+            printf '_Run: %s_\n' "$RUN_URL"
+          } > /tmp/tier-comment-body.md
+
+          # Marker-based upsert.
+          EXISTING=$(gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq "[.[] | select(.body | contains(\"$MARKER\"))] | .[0].id // empty" \
+            | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$EXISTING" -F "body=@/tmp/tier-comment-body.md" > /dev/null
+            echo "[tier-classify] updated existing comment $EXISTING"
+          else
+            gh api -X POST "repos/$GH_REPO/issues/$PR_NUMBER/comments" -F "body=@/tmp/tier-comment-body.md" > /dev/null
+            echo "[tier-classify] posted new comment on PR #$PR_NUMBER"
+          fi
+
+      # ── 6. Fork PRs: explain the skip so a green run isn't mistaken for a
+      #      applied label. Read-only token; nothing above could have written. ──
+      - name: Note fork PR (read-only token)
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        env:
+          TIER: ${{ steps.tier.outputs.tier }}
+          RULE: ${{ steps.tier.outputs.rule }}
+        run: |
+          echo "[tier-classify] Fork PR — GITHUB_TOKEN is read-only, so the label and"
+          echo "[tier-classify] comment steps were skipped. Computed tier: $TIER"
+          echo "[tier-classify] Rule fired: $RULE"
+          echo "[tier-classify] Downstream review workflows default to RUN when the"
+          echo "[tier-classify] label is absent, so this PR gets the full review."

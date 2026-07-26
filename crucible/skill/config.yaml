@@ -1,0 +1,300 @@
+# Crucible — model, threshold, and feature configuration
+#
+# Single source of truth for which model runs in which reviewer slot, which
+# thresholds fire which gates, and which optional integrations are enabled.
+#
+# DEFAULTS RUN ON NOTHING BUT CLAUDE CODE. Out of the box every reviewer is a
+# Claude subagent, every integration is off, and a review needs no account, no
+# API key, and no local server. The optional integrations below are real and
+# tested, but they are accelerators — Crucible's architecture does not depend
+# on them, and each one falls back to the Claude path when unavailable.
+#
+# Two-level model resolution:
+#   1. `models.<role>` names a provider-key (stable across model releases)
+#   2. `claude_model_map` / `gateway_model_map` / `local_model_map` resolve that
+#      key to the concrete model the runtime is handed
+#
+# When a new model version ships, edit ONE line in the relevant map — every
+# reviewer referencing the provider-key picks it up.
+#
+# Per-project overrides: drop a `.crucible.yaml` at your repo root. It is
+# resolved from the current working directory and deep-merged over this file,
+# so you can retune Crucible per repo without forking the skill.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reviewer model assignment
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider-keys prefixed `claude-` dispatch as a Claude Code subagent (no
+# network dependency beyond Claude Code itself). Keys prefixed `gateway-`,
+# `codex-`, or `local-` require the corresponding integration to be enabled;
+# if it is disabled or unreachable, resolution falls back down
+# `reviewer_fallback_chain` and ultimately to a Claude subagent.
+
+models:
+  # ── Pass 1: the ten enumeration reviewers ──
+  reviewer_code_quality:      claude-sonnet
+  reviewer_security:          claude-sonnet
+  reviewer_simplify:          claude-sonnet
+  reviewer_typescript:        claude-sonnet
+  reviewer_platform:          claude-sonnet
+  reviewer_test_runner:       claude-sonnet
+  reviewer_clone_detector:    claude-sonnet   # heuristic mode; set to a local-* key for true semantic clone detection
+  reviewer_ci_tamper:         claude-haiku    # pure YAML pattern-match — the smallest model holds
+  reviewer_history_analyzer:  claude-sonnet
+  reviewer_pr_continuity:     claude-sonnet
+
+  # ── Pass 2: the adversarial disprove pass ──
+  disprove_primary:           claude-haiku
+  # Second, vendor-diverse opinion on CRITICAL/HIGH findings. Null by default:
+  # a single-vendor disprove is the standard path. Set to a `gateway-*` key and
+  # enable integrations.gateway to turn on cross-vendor gating — two independent
+  # models must BOTH fail to disprove a finding before it survives.
+  disprove_cross_vendor:      null
+
+  # ── Embeddings (semantic clone detection only; requires an integration) ──
+  embedding_primary:          null
+
+# Fallback chain for any reviewer whose resolved model is unavailable — a
+# disabled integration, a missing key, an unreachable endpoint, a timeout, or a
+# rate limit. Tried in order, left to right.
+#
+# THE FINAL ENTRY MUST BE A `claude-*` KEY. That entry dispatches as a local
+# Claude Code subagent with no external dependency, which guarantees every
+# reviewer still runs whenever Crucible itself is running. A reviewer slot goes
+# empty only if every entry in this chain fails.
+reviewer_fallback_chain:
+  - claude-sonnet
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider-key → concrete model maps
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Claude Code subagent dispatch. Values are the aliases the harness accepts in
+# an Agent call's `model` field. Aliases are used rather than pinned model IDs
+# so the skill keeps working across model releases; pin an exact ID here if you
+# need reproducibility for an evaluation run.
+claude_model_map:
+  claude-opus:    opus
+  claude-sonnet:  sonnet
+  claude-haiku:   haiku
+
+# OpenAI-compatible gateway routes. Requires integrations.gateway.enabled.
+# Any provider exposing an OpenAI-compatible /chat/completions endpoint works —
+# a hosted AI gateway, a self-hosted proxy, or a vendor API directly. The value
+# is whatever model string that endpoint expects.
+gateway_model_map: {}
+  # Examples — uncomment and adapt to your endpoint's naming:
+  # gateway-gemini-flash:  google-ai-studio/gemini-3-flash-preview
+  # gateway-gpt:           openai/gpt-5.5
+  # gateway-embedding:     openai/text-embedding-3-small
+
+# Local runtime routes (LM Studio, Ollama, llama.cpp, vLLM — anything serving an
+# OpenAI-compatible API). Requires integrations.local_models.enabled.
+local_model_map: {}
+  # Example — a local embedding model for semantic clone detection:
+  # local-embed:
+  #   endpoint: http://localhost:1234/v1
+  #   model: text-embedding-nomic-embed-text-v1.5
+  #   dim: 768
+
+# External CLI routes — a coding CLI invoked as a subprocess, used to bring a
+# genuinely different vendor's reasoning into Pass 1. Requires
+# integrations.external_cli.enabled.
+external_cli_map: {}
+  # Example:
+  # cli-alt-vendor:
+  #   command: codex
+  #   args: ["exec"]
+  #   reasoning_effort: high
+  #   fallback: claude-sonnet
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional integrations — ALL OFF BY DEFAULT
+# ─────────────────────────────────────────────────────────────────────────────
+# Crucible runs a complete review with every one of these disabled. Each buys a
+# specific capability; none is required. Turning one on and having it fail is
+# safe — resolution falls back to the Claude path and logs the hop.
+
+integrations:
+  # Cross-vendor reviewers and cross-vendor disprove via an OpenAI-compatible
+  # gateway. BUYS: a second vendor's opinion, which is the strongest available
+  # signal that a finding is real — two independent models agreeing beats one
+  # model being confident. COSTS: an endpoint, a key, and per-call spend.
+  gateway:
+    enabled: false
+    base_url: ""             # e.g. https://your-gateway.example/v1
+    api_key_env: ""          # NAME of the env var holding the key — never the key itself
+    timeout_ms: 60000
+
+  # Local models for semantic clone detection. BUYS: Type-4 clone detection —
+  # finding new code whose *behavior* duplicates existing code even when the
+  # text differs completely, which no text-diff reviewer can see. COSTS: a
+  # local inference server. Free to run, private, no data leaves the machine.
+  local_models:
+    enabled: false
+
+  # An external coding CLI as a Pass 1 reviewer. BUYS: vendor diversity in
+  # enumeration without a gateway. COSTS: that CLI installed and authenticated.
+  external_cli:
+    enabled: false
+
+  # Append one JSONL row per disprove verdict for offline analysis. BUYS: the
+  # data to decide, empirically, whether a cheaper model is safe to promote
+  # into the authoritative disprove slot. COSTS: a local file that grows.
+  verdict_log:
+    enabled: false
+    path: ".crucible/verdicts.jsonl"
+
+  # Arm's Metis (https://github.com/arm/metis) as an extra security phase,
+  # running between the verification gate and Pass 1. BUYS: a second security
+  # opinion from a purpose-built scanner with whole-repository RAG context and
+  # deterministic reachability analysis — a different kind of answer than any
+  # reviewer prompt produces. COSTS: Docker, a Postgres container, an index per
+  # project, and per-scan model spend.
+  #
+  # Entirely optional and non-blocking. When disabled, unreachable, or failing,
+  # the review continues and simply notes that the scan did not run — a missing
+  # second opinion must never stop a review that would otherwise complete.
+  metis:
+    enabled: false
+
+    # Directory holding Metis's docker-compose.yml. Required when enabled.
+    compose_dir: ""
+
+    # Container, image, and network names. Defaults match Metis's stock compose.
+    postgres_container: "metis_postgres"
+    scan_image: "metis"
+    network: "metis_default"
+
+    # Postgres credentials as configured in your Metis compose file. These are
+    # local-container credentials, not secrets — but if yours differ from the
+    # defaults, set them here rather than editing the scripts.
+    db:
+      user: "metis_user"
+      password: "metis_password"
+      name: "metis_db"
+      host: "metis_postgres"
+      port: 5432
+
+    # Per-project index schema. Empty means "use the repository directory name",
+    # which is usually what you want — one schema per project.
+    schema: ""
+
+    # Model access. Metis speaks the OpenAI API, so any OpenAI-compatible
+    # endpoint works: OpenAI directly, or a gateway/proxy in front of it.
+    #
+    # BOTH values are the NAME of an environment variable, never the value
+    # itself. Nothing here should ever contain a key, an account identifier, or
+    # a private endpoint — those belong in your environment, not in a file that
+    # gets committed.
+    llm:
+      base_url_env: "OPENAI_BASE_URL"    # unset/empty → Metis uses the OpenAI default
+      api_key_env: "OPENAI_API_KEY"
+      model: "gpt-5.5"
+      reasoning_effort: "medium"
+      code_embedding_model: "text-embedding-3-large"
+      docs_embedding_model: "text-embedding-3-large"
+      embed_dim: 3072
+
+    # Start Docker Desktop automatically when the daemon is down.
+    #
+    # A sentinel records that this integration started the daemon, and the
+    # reaper only ever quits a daemon it started — one you launched yourself is
+    # never touched. The sentinel is written BEFORE the launch, so a crash
+    # mid-start still leaves a reapable marker.
+    autostart_docker: true
+
+    # Quit an auto-started Docker daemon after this many idle minutes, to
+    # reclaim the VM's memory. 0 disables reaping entirely.
+    #
+    # READ THIS BEFORE LEAVING IT ON. The sentinel proves this integration
+    # started the DAEMON. It does not prove this integration is the daemon's
+    # only user. Quitting Docker Desktop stops EVERY running container, and
+    # `docker compose stop` in your Metis compose directory stops every service
+    # in that compose project — not only Metis's.
+    #
+    # So: if the scan starts Docker for you, and you then start your own
+    # database or dev services in that same daemon, this reaper will take them
+    # down with it once Metis goes idle. The liveness checks only look for
+    # Metis scan containers and Metis scan processes; they cannot see that you
+    # care about anything else.
+    #
+    # Set 0 if you run anything else in Docker. The cost of leaving the daemon
+    # up is memory; the cost of reaping is someone else's running container.
+    idle_reap_minutes: 10
+
+    # Open a tracking issue when a review completes but the Metis scan was
+    # skipped because Docker or Postgres was unavailable — so a silently-missing
+    # security pass leaves a visible trace instead of vanishing.
+    #
+    # OFF by default, and deliberately so: a code-review tool that files issues
+    # in your repository without being asked is a bad surprise. `repo` is
+    # REQUIRED when this is enabled — there is no inference from the git remote,
+    # because guessing where to file is exactly the wrong thing to guess. With
+    # `enabled: true` and an empty `repo`, issue filing stays off and the run
+    # warns. The issue auto-closes on the next run once Metis is reachable.
+    issue_on_unavailable:
+      enabled: false
+      repo: ""                # "owner/name" — required when enabled
+      labels: []              # applied only if they already exist in the repo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Light-path exit — skip the fleet on provably inert diffs
+# ─────────────────────────────────────────────────────────────────────────────
+# A diff where every changed file is content-only and the added-LOC total is
+# under the ceiling is classified LIGHT and skips the review fleet entirely.
+#
+# DENY BY DEFAULT: any file whose extension is not allow-listed forces the FULL
+# review. Deliberately conservative — only formats that cannot carry executable
+# code are eligible. `.mdx` is excluded because it compiles JSX.
+#
+# BEHAVIOR-STEERING DOCS ARE ALWAYS FULL, even though they are Markdown:
+# CLAUDE.md, AGENTS.md, SKILL.md, copilot-instructions.md, and anything under
+# `.claude/`, `.github/`, `commands/`, or `agents/` change how an agent behaves,
+# which makes them executable in every sense that matters. That deny-list is
+# hardcoded in the classifier and cannot be widened by config.
+light_path:
+  enabled: true
+  allow_extensions: [".md", ".txt", ".rst"]
+  allow_paths: []            # exact repo-relative paths also treated as inert, e.g. "LICENSE"
+  max_loc: 1000              # added-LOC ceiling; above this even docs take the full path
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Risk-tier escalation — change the disposition, not just the depth
+# ─────────────────────────────────────────────────────────────────────────────
+# A diff touching a SENSITIVE path (auth, secrets, billing, migrations, CI/infra)
+# escalates how Crucible DISPOSES of its findings:
+#   - the security reviewer is forced and never trimmed
+#   - autopilot auto-fix is disabled — findings surface for a human to apply
+#   - a clean APPROVE is downgraded to REVIEW-REQUIRED, so a human signs off
+#
+# The sensitive set is a hardcoded baseline with NO off-switch. `sensitive_paths`
+# below only ADDS project-specific patterns — config can escalate more, never
+# less. The classifier fails toward "sensitive" on any ambiguity.
+risk_tiers:
+  sensitive_paths: []        # extra regex sources, e.g. ["(^|/)payments/", "payroll"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Numeric thresholds
+# ─────────────────────────────────────────────────────────────────────────────
+thresholds:
+  confidence_floor:                   80     # Phase 5 — a finding below this is dropped
+  per_reviewer_cap:                   5      # Phase 5 — top N per reviewer by impact-minus-effort
+  large_pr_warn_loc:                  400    # Phase 0 — soft warning, proceed on confirmation
+  large_pr_block_loc:                 1000   # Phase 0 — hard block, demand decomposition
+  cross_vendor_disprove_min_severity: HIGH   # severity floor for the second disprove opinion
+  clone_mrs_threshold:                0.80   # semantic clone Max Redundancy Score; recalibrate per embedding model
+  removal_tracking_max_ratio:         3.0    # added/removed LOC ratio at or above which R12 emits a structural candidate
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature flags
+# ─────────────────────────────────────────────────────────────────────────────
+flags:
+  packet_input:                    true   # give reviewers a structured packet (signatures + docstrings) not just a raw diff
+  yaml_output_contract:            true   # reviewers emit YAML block scalars — ~30% fewer tokens than JSON on code-heavy fields
+  scope_constrain_split_severity:  true   # split each reviewer into CRITICAL/HIGH and MEDIUM passes so nits cannot crowd out bugs
+  fail_on_revert_gate:             true   # warn when a functional change ships with no test that fails if it is reverted
+  auto_route_delta_review:         true   # on a re-review, scan only what changed since the last review
+  python_tabify:                   true   # tab-compress Python before review — meaningful token saving, no semantic change
+  agent_author_profile:            true   # weight review toward the known failure patterns of the diff's author
+  cross_vendor_disprove:           false   # requires integrations.gateway and models.disprove_cross_vendor

@@ -1,0 +1,149 @@
+name: Noted Items Issue
+
+# Files ONE tracking issue per PR for the SUGGESTION-severity findings the
+# pre-PR review reported, so lower-severity items survive the merge instead of
+# scrolling off the PR.
+#
+# CRITICAL and WARNING findings are deliberately excluded — those are meant to be
+# fixed in the PR, and filing them as follow-ups is how a blocking finding
+# quietly becomes a backlog item. The severity split lives in
+# noted-items/parse-noted-items.ts and is unit-tested there.
+#
+# Idempotent by canonical title: if an issue with the same title is already open,
+# this does nothing. That is what makes it safe to re-run.
+
+on:
+  workflow_run:
+    workflows: ["Pre-PR Review"]
+    types: [completed]
+
+concurrency:
+  group: noted-items-issue-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  actions: read
+
+jobs:
+  file-issue:
+    name: File a tracking issue for noted items
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Merge-queue exclusion: never file an issue against a speculative merge
+    # commit. Fork exclusion: this job holds issues:write.
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.event != 'merge_group'
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+      SCRIPTS_DIR: .github
+
+    steps:
+      - name: Resolve associated PR
+        id: pr
+        env:
+          PRS_JSON: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # Read the PR from the event payload rather than looking it up by head
+          # SHA: any push to the PR branch between the trigger and this job moves
+          # headRefOid, and the lookup then silently returns empty — the issue is
+          # never filed and nothing reports that it wasn't.
+          PR_NUMBER=$(printf '%s' "$PRS_JSON" | jq -r '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::notice::No PR linked to workflow_run for $HEAD_SHA — exiting"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        if: steps.pr.outputs.found == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.2"
+
+      # Scripts come from the default branch, never the PR tree — same rule as
+      # every other job in this pipeline.
+      - name: Checkout default branch
+        if: steps.pr.outputs.found == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          fetch-depth: 1
+
+      - name: Fetch the reviewer's sticky comment
+        id: comment
+        if: steps.pr.outputs.found == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          # The reviewer upserts a single comment carrying this marker, so there
+          # is at most one. `// empty` keeps a missing comment from becoming the
+          # string "null".
+          gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq '[.[] | select(.body | contains("<!-- pre-pr-review -->"))] | .[0].body // empty' \
+            > /tmp/review-comment.md
+          if [ ! -s /tmp/review-comment.md ]; then
+            echo "::notice::No pre-pr-review comment on PR #$PR_NUMBER — exiting"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse noted items
+        id: noted
+        if: steps.pr.outputs.found == 'true' && steps.comment.outputs.found == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # The comment body reaches the script through an env var read from a
+          # FILE — never through a `${{ }}` expansion spliced into this script.
+          # It is model-authored text derived from an attacker-influenceable
+          # diff; interpolating it into a shell command is how that text becomes
+          # a command.
+          COMMENT_BODY="$(cat /tmp/review-comment.md)" bun "$SCRIPTS_DIR/noted-items/parse-noted-items.ts"
+
+      - name: Create the tracking issue if it does not exist
+        if: steps.pr.outputs.found == 'true' && steps.noted.outputs.has_items == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          COUNT: ${{ steps.noted.outputs.count }}
+        run: |
+          set -euo pipefail
+          ISSUE_TITLE="review: address noted items from pre-PR review (PR $PR_NUMBER)"
+
+          EXISTING=$(gh issue list \
+            --repo "$GH_REPO" \
+            --state open \
+            --search "\"$ISSUE_TITLE\" in:title" \
+            --json number,title \
+            --jq ".[] | select(.title == \"$ISSUE_TITLE\") | .number" \
+            | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            echo "::notice::Issue $EXISTING already tracks this PR's noted items — exiting."
+            exit 0
+          fi
+
+          gh label create "noted-items" --color "5319e7" --repo "$GH_REPO" \
+            --description "Lower-severity review findings tracked after merge" 2>/dev/null || true
+
+          gh issue create \
+            --repo "$GH_REPO" \
+            --title "$ISSUE_TITLE" \
+            --body-file /tmp/noted-items-body.md \
+            --label "noted-items"
+
+          echo "Filed a tracking issue for $COUNT noted item(s) from PR $PR_NUMBER"

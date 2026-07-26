@@ -1,0 +1,319 @@
+name: Pre-PR Review
+
+# Reviews a pull request with one LLM call and posts a sticky
+# `<!-- pre-pr-review -->` comment that begins with `## Pre-PR Review:` — the
+# header the coordinator workflow uses to detect this surface.
+#
+# Architecture
+# ────────────
+# 1. Trigger after CI completes successfully, or by manual dispatch.
+# 2. Resolve the PR from workflow_run.pull_requests to avoid head SHA races.
+# 3. Skip already-reviewed, trivial, opted-out, and docs-only PRs.
+# 4. Check out the PR head with full history for the merge-base diff.
+# 5. Check out the DEFAULT BRANCH separately and stage the prompt + scripts from
+#    it into /tmp — never run the PR's own copy of its reviewer.
+# 6. Collect diff + file context, then call the model.
+# 7. Upload telemetry artifacts for audit/debugging.
+# 8. Label the PR after a successful review to prevent duplicate runs.
+#
+# ADOPT ME
+# ────────
+# - `workflows: ["CI"]` below must name YOUR required-check workflow.
+# - Set the secret `REVIEW_API_TOKEN` and the variables `REVIEW_API_BASE_URL`
+#   and `REVIEW_MODEL`. Optional: `REVIEW_MODEL_LARGE`, `REVIEW_METADATA_HEADER`.
+# - `SCRIPTS_DIR` is where you copied the `pre-pr-review/` directory.
+#
+# The reviewer scripts always run from the default branch, never from the PR.
+# Consequence worth knowing: a PR that FIXES the reviewer cannot be reviewed by
+# its own fix — the first real exercise of any reviewer change is the NEXT PR
+# after it merges. Plan validation accordingly; do not read a green run on the
+# fixing PR as evidence the fix works.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: number
+
+# Prevent duplicate runs on the same PR head. NOT cancel-in-progress: this
+# workflow's comment is the source of truth for its surface, and cancelling
+# mid-upsert drops the verdict.
+concurrency:
+  group: pre-pr-review-${{ github.event.workflow_run.head_sha || github.event.inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pre-pr-review:
+    name: Run pre-pr-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # Only run when CI actually succeeded (or when manually dispatched).
+    # head_repository match defends against fork PRs rewriting review inputs
+    # while this workflow holds pull-requests:write + issues:write.
+    # Merge-queue exclusion: when CI runs against a merge_group commit, the
+    # upstream PR has already been reviewed — re-reviewing the speculative merge
+    # wastes minutes and posts duplicate noise on the PR.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event != 'merge_group')
+    env:
+      GH_REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+      SCRIPTS_DIR: .github
+      # Paths treated as documentation for the docs-only skip check.
+      DOCS_ONLY_REGEX: '(^|/)[^/]+\.md$|^docs/'
+
+    steps:
+      # ── 1. Resolve PR number ─────────────────────────────────────────────
+      # Use the workflow_run event payload's `pull_requests` array, NOT
+      # `gh pr list --jq '.headRefOid == "$HEAD_SHA"'`. Any workflow that pushes
+      # to the PR branch (a changelog bot, a formatter) moves headRefOid within
+      # seconds of the PR opening; by the time this workflow fires the SHA
+      # lookup returns empty and the review is silently skipped. The event
+      # payload links the triggering CI run to its PR at fire-time, so a later
+      # push cannot move it out from under us.
+      - name: Resolve PR number
+        id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PR: ${{ github.event.inputs.pr_number }}
+          PRS_JSON: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Resolve the PR head explicitly. Falling back to `github.sha` here
+            # would check out the workflow source on the default branch, NOT the
+            # PR head, and produce an empty diff that reads as "nothing to review".
+            HEAD_OID=$(gh pr view "$DISPATCH_PR" --repo "$GH_REPO" --json headRefOid --jq '.headRefOid')
+            if [ -z "$HEAD_OID" ]; then
+              echo "::error::Could not resolve head SHA for PR #$DISPATCH_PR"
+              exit 1
+            fi
+            echo "number=$DISPATCH_PR" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$HEAD_OID" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PR_NUMBER=$(printf '%s' "$PRS_JSON" | jq -r '.[0].number // empty')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::notice::No PR linked to workflow_run for $HEAD_SHA — skipping"
+            echo "number=" >> "$GITHUB_OUTPUT"
+            echo "head_sha=" >> "$GITHUB_OUTPUT"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 2. Skip check (label + PR body + docs-only) ──────────────────────
+      - name: Check for skip signals
+        id: skip
+        if: steps.pr.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          PR_DATA=$(gh pr view "$PR_NUMBER" \
+            --repo "$GH_REPO" \
+            --json labels,body)
+
+          LABELS=$(echo "$PR_DATA" | jq -r '[.labels[].name] | @json')
+          PR_BODY=$(echo  "$PR_DATA" | jq -r '.body // ""')
+
+          if echo "$LABELS" | grep -q '"pre-pr-review-done"'; then
+            echo "reason=label 'pre-pr-review-done' present" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Risk-tier gate: skip the 5-reviewer pass on Trivial-tier PRs.
+          # Default-to-RUN when the label is absent — the classifier races this
+          # workflow on `pull_request.opened`, and the safe side of that race is
+          # an unnecessary review, not a skipped one.
+          if echo "$LABELS" | grep -q '"tier:trivial"'; then
+            echo "reason=label 'tier:trivial' present" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip-marker detection. An earlier regex matched anywhere in the body,
+          # including code-quoted occurrences, so a PR that merely described the
+          # marker opted itself out. Fix: prefer an HTML-comment marker, which
+          # does not appear in natural prose; accept the legacy bracket form ONLY
+          # when it is the whole line (-x), so inline mentions no longer match.
+          if echo "$PR_BODY" | grep -iqF '<!-- skip-pre-pr-review -->'; then
+            echo "reason=HTML-comment skip marker present in PR body" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$PR_BODY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+            | grep -iqxE '\[skip-pre-pr-review\]|\[pre-pr-review[: ]+skip\]|\[pre-pr-review[: ]+done\]'; then
+            echo "reason=legacy skip marker on its own line in PR body" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Docs-only PRs have no code to review — skip to save runner minutes
+          # and model spend.
+          NON_DOCS=$(gh pr diff "$PR_NUMBER" --repo "$GH_REPO" --name-only \
+            | grep -vE "$DOCS_ONLY_REGEX" \
+            || true)
+          if [ -z "$NON_DOCS" ]; then
+            echo "reason=docs-only PR — nothing to review" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Log skip reason
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip == 'true'
+        env:
+          SKIP_REASON: ${{ steps.skip.outputs.reason }}
+        run: |
+          echo "Skipping pre-pr-review: $SKIP_REASON"
+
+      # ── 3. Setup Bun ────────────────────────────────────────────────────
+      - name: Setup Bun
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          # Pinned major — `latest` would let an upstream Bun release regress the
+          # /tmp scripts with no signal in any PR's diff.
+          bun-version: "1.2"
+
+      # ── 4. Checkout PR head ─────────────────────────────────────────────
+      - name: Checkout PR head
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.pr.outputs.head_sha }}
+
+      # ── 5. Stage trusted scripts ────────────────────────────────────────
+      # Never read the prompt or scripts from the PR tree — the default branch is
+      # the trusted source. A second checkout pinned to the default branch into a
+      # separate path, then `cp` from there: no fetch race window, and the PR
+      # cannot rewrite the instructions that judge it.
+      - name: Checkout default branch (trusted scripts source)
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          fetch-depth: 1
+          path: trusted-checkout
+
+      - name: Stage trusted scripts at /tmp
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # Refresh the base ref in the PR-head checkout so collect-diff.ts's
+          # three-dot `git diff <base>...HEAD` resolves against the current base.
+          #
+          # NEVER --depth=1: a three-dot diff resolves the MERGE BASE, which is
+          # an older commit than the base branch tip whenever the branch is
+          # behind. A shallow fetch never brings it, so the diff dies with "no
+          # merge base" — and because this workflow is not a required check, the
+          # dead job is indistinguishable on the PR from a clean review.
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          # Stage the scripts PRESERVING their directory layout, because
+          # call-reviewer.ts imports ../lib/model-client.ts (the shared model
+          # client). A flat copy to /tmp would break that relative import. The
+          # prompt and every data file are still read from absolute /tmp paths,
+          # so only the scripts need structure. All of it still comes from the
+          # trusted checkout pinned to the default branch — same trust as before.
+          mkdir -p /tmp/ci-scripts/pre-pr-review /tmp/ci-scripts/lib
+          cp "trusted-checkout/$SCRIPTS_DIR/pre-pr-review/reviewer-prompt.md" /tmp/reviewer-prompt.md
+          cp "trusted-checkout/$SCRIPTS_DIR/pre-pr-review/collect-diff.ts" /tmp/ci-scripts/pre-pr-review/collect-diff.ts
+          cp "trusted-checkout/$SCRIPTS_DIR/pre-pr-review/call-reviewer.ts" /tmp/ci-scripts/pre-pr-review/call-reviewer.ts
+          cp "trusted-checkout/$SCRIPTS_DIR/lib/model-client.ts" /tmp/ci-scripts/lib/model-client.ts
+
+      # ── 6. Collect diff + file context ──────────────────────────────────
+      - name: Collect diff + file context
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        env:
+          BASE_SHA: origin/${{ github.event.repository.default_branch || 'main' }}
+        run: bun /tmp/ci-scripts/pre-pr-review/collect-diff.ts
+
+      # ── 7. Call the reviewer ────────────────────────────────────────────
+      - name: Call reviewer
+        # `!cancelled()` rather than plain success: when an earlier step fails,
+        # call-reviewer.ts still runs, finds its inputs missing, and posts a
+        # DEGRADED comment before exiting 1. Without this the job aborts silently
+        # — and since pre-pr-review is not a required check, an absent review is
+        # indistinguishable from a clean one on the PR. Not `always()`: a
+        # cancelled run should post nothing.
+        #
+        # This condition alone was INERT once before: the script read one of its
+        # inputs unguarded, ahead of the guarded read, so it threw before
+        # reaching the degraded path. A guard placed after an unguarded read of
+        # the same resource never executes. Both halves are load-bearing.
+        if: |
+          !cancelled() && steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        env:
+          REVIEW_API_TOKEN: ${{ secrets.REVIEW_API_TOKEN }}
+          REVIEW_API_BASE_URL: ${{ vars.REVIEW_API_BASE_URL }}
+          REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
+          REVIEW_MODEL_LARGE: ${{ vars.REVIEW_MODEL_LARGE }}
+          REVIEW_METADATA_HEADER: ${{ vars.REVIEW_METADATA_HEADER }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bun /tmp/ci-scripts/pre-pr-review/call-reviewer.ts
+
+      # ── 8. Upload telemetry artifact ────────────────────────────────────
+      - name: Upload telemetry artifact
+        if: always() && steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pre-pr-review-pr-${{ steps.pr.outputs.number }}-${{ github.run_id }}
+          path: |
+            /tmp/pr-diff.txt
+            /tmp/pre-pr-review-raw.json
+            /tmp/pre-pr-review-raw-error.txt
+            /tmp/pr-files.json
+            /tmp/pre-pr-review-meta.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # ── 9. Mark as done to prevent future re-runs ───────────────────────
+      # `success()` is load-bearing, not decoration. This label is what tells
+      # every later run "already reviewed, skip". If the reviewer step failed —
+      # or was pushed past with continue-on-error — an unguarded label step
+      # would mark the PR reviewed when no review happened, and nothing would
+      # ever revisit it.
+      - name: Add pre-pr-review-done label
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          # Ensure the label exists in the repository (idempotent)
+          gh label create "pre-pr-review-done" \
+            --color "0075ca" \
+            --description "The pre-PR review has run for this PR" \
+            2>/dev/null || true
+
+          gh pr edit "$PR_NUMBER" \
+            --add-label "pre-pr-review-done"

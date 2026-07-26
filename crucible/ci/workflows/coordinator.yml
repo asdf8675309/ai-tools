@@ -1,0 +1,275 @@
+name: Coordinator Judge
+
+# Reads every bot-posted comment on a PR, deduplicates and re-classifies the
+# findings with one model call, and emits ONE
+# APPROVE / APPROVE_WITH_COMMENTS / BLOCK verdict comment.
+#
+# Architecture
+# ────────────
+# 1. Trigger after each comment-posting workflow completes, plus on review
+#    submission. cancel-in-progress is OFF — see the concurrency note below.
+# 2. Trusted prompt + scripts loaded from the DEFAULT BRANCH, never from the PR
+#    tree — same prompt-injection defense as pre-pr-review.yml.
+# 3. fetch-surfaces.ts fetches all PR comments, filters by surface markers.
+# 4. Gate: at least 2 distinct surfaces, or there is nothing to deduplicate.
+# 5. call-coordinator.ts calls the model and posts the sticky verdict comment.
+#
+# ADOPT ME
+# ────────
+# - `workflows:` below must name YOUR comment-posting workflows.
+# - Secret `REVIEW_API_TOKEN`; variables `REVIEW_API_BASE_URL`, `REVIEW_MODEL`.
+# - Optional `INCREMENTAL_REVIEW_ENABLED=true` turns on cross-commit state
+#   tracking and `/dismiss <finding-id> <reason>` commands.
+#
+# Skip mechanisms
+# ───────────────
+# - Label `no-coordinator` on the PR
+# - `<!-- skip-coordinator -->` marker in the PR body
+# - PR is draft, closed, or merged
+# - Triggering workflow_run failed (don't coordinate against red CI)
+# - Fewer than 2 source surfaces have posted
+#
+# Loop safety
+# ───────────
+# - This workflow does not subscribe to `issue_comment`, so its own comment
+#   cannot retrigger it. fetch-surfaces.ts additionally self-skips both
+#   coordinator markers — belt and braces, because a loop here costs money per
+#   iteration.
+# - Sticky upsert by marker prevents duplicate comments on rapid re-runs.
+
+on:
+  workflow_run:
+    workflows: ["CI", "Pre-PR Review"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to coordinate"
+        required: true
+        type: number
+
+concurrency:
+  # Serialize same-PR-head runs but DON'T cancel in-flight ones — this workflow
+  # writes the comment that is the source of truth for its surface, and
+  # cancelling mid-upsert drops a verdict. Every comment-writing workflow in this
+  # pipeline follows the same rule; only the idempotent classifier cancels.
+  group: coordinator-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.event.inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write       # PR comments use the issues API under the hood
+  actions: read
+
+jobs:
+  coordinator:
+    name: Coordinate review surfaces
+    # Skip if triggered by a failed workflow_run (don't coordinate red CI).
+    # workflow_dispatch always proceeds (manual operator).
+    # Fork-protection: both workflow_run AND pull_request_review must originate
+    # from this repo — a fork PR's review submission would otherwise burn model
+    # budget on attacker-influenced PR content while this job holds write scopes.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_REPO: ${{ github.repository }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+      SCRIPTS_DIR: .github
+
+    steps:
+      # ── 1. Resolve PR number ─────────────────────────────────────────────
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PR: ${{ github.event.inputs.pr_number }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PRS_JSON: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # head_sha is only consumed by incremental mode, which keys its state
+          # on the PR head. Without it the script falls back to GITHUB_SHA —
+          # which in this job is the DEFAULT BRANCH's SHA, since that is what is
+          # checked out — and every run would look like a force-push.
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              echo "number=$DISPATCH_PR" >> "$GITHUB_OUTPUT"
+              echo "head_sha=$(gh pr view "$DISPATCH_PR" --repo "$GH_REPO" --json headRefOid --jq '.headRefOid')" >> "$GITHUB_OUTPUT"
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              ;;
+            pull_request_review)
+              echo "number=$REVIEW_PR" >> "$GITHUB_OUTPUT"
+              echo "head_sha=$REVIEW_PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_run)
+              # Read the PR from the event payload rather than looking it up by
+              # head SHA: any push to the PR branch between the trigger and this
+              # job moves headRefOid, and the lookup then silently returns empty.
+              PR_NUMBER=$(printf '%s' "$PRS_JSON" | jq -r '.[0].number // empty')
+              if [ -z "$PR_NUMBER" ]; then
+                echo "::notice::No PR linked to workflow_run for $HEAD_SHA — skipping"
+                echo "number=" >> "$GITHUB_OUTPUT"
+                echo "found=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+                echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+                echo "found=true" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+          esac
+
+      # ── 2. Skip checks ──────────────────────────────────────────────────
+      - name: Check for skip signals
+        id: skip
+        if: steps.pr.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          PR_DATA=$(gh pr view "$PR_NUMBER" \
+            --repo "$GH_REPO" \
+            --json labels,body,isDraft,state)
+
+          STATE=$(echo "$PR_DATA" | jq -r '.state')
+          IS_DRAFT=$(echo "$PR_DATA" | jq -r '.isDraft')
+          LABELS=$(echo "$PR_DATA" | jq -r '[.labels[].name] | @json')
+          PR_BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
+
+          if [ "$STATE" != "OPEN" ]; then
+            echo "reason=PR state is $STATE" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "reason=PR is draft" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if echo "$LABELS" | grep -q '"no-coordinator"'; then
+            echo "reason=label 'no-coordinator' present" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if echo "$PR_BODY" | grep -iqF '<!-- skip-coordinator -->'; then
+            echo "reason=skip marker in PR body" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Log skip reason
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip == 'true'
+        env:
+          SKIP_REASON: ${{ steps.skip.outputs.reason }}
+        run: |
+          echo "Skipping coordinator-judge: $SKIP_REASON"
+
+      # ── 3. Debounce ─────────────────────────────────────────────────────
+      # Brief wait so any in-flight comment upserts from other workflows finish
+      # writing before we snapshot the PR comment state.
+      - name: Debounce
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        run: sleep 15
+
+      # ── 4. Setup Bun ────────────────────────────────────────────────────
+      - name: Setup Bun
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.2"
+
+      # ── 5. Checkout the default branch ──────────────────────────────────
+      # Same prompt-injection defense as pre-pr-review.yml: scripts come from the
+      # default branch, NEVER from the PR's tree. Note the PR tree is not checked
+      # out at all here — the coordinator reads comments, not code.
+      - name: Checkout default branch
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          fetch-depth: 1
+
+      # The workspace IS the trusted checkout for the whole job, so the scripts
+      # run in place — copying them to /tmp breaks call-coordinator.ts's relative
+      # sibling imports. Only the prompt template is staged at /tmp, where the
+      # script reads it from.
+      - name: Stage trusted prompt at /tmp
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        run: cp "$SCRIPTS_DIR/coordinator/coordinator-prompt.md" /tmp/coordinator-prompt.md
+
+      # ── 6. Fetch source-surface comments ────────────────────────────────
+      - name: Fetch source-surface comments
+        id: fetch
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          bun "$SCRIPTS_DIR/coordinator/fetch-surfaces.ts" > /tmp/comments.json
+          SURFACE_COUNT=$(jq -r '.surface_count' /tmp/comments.json)
+          FINDING_COUNT=$(jq -r '.finding_count' /tmp/comments.json)
+          echo "surface_count=$SURFACE_COUNT" >> "$GITHUB_OUTPUT"
+          echo "finding_count=$FINDING_COUNT" >> "$GITHUB_OUTPUT"
+          echo "[coordinator] surfaces present: $(jq -r '.surfaces_present | join(", ")' /tmp/comments.json)"
+
+      # ── 7. Surface-count gate ───────────────────────────────────────────
+      # Need at least 2 distinct surfaces to dedupe meaningfully. A single-surface
+      # PR already has a clear signal; the coordinator would only add noise.
+      - name: Gate on surface count
+        id: gate
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true'
+        env:
+          SURFACE_COUNT: ${{ steps.fetch.outputs.surface_count }}
+        run: |
+          if [ "${SURFACE_COUNT:-0}" -lt 2 ]; then
+            echo "::notice::Only $SURFACE_COUNT source surface(s) present — the coordinator needs >=2 to dedupe; exiting"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 8. Call the coordinator ─────────────────────────────────────────
+      - name: Call coordinator
+        if: steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true' && steps.gate.outputs.proceed == 'true'
+        env:
+          REVIEW_API_TOKEN: ${{ secrets.REVIEW_API_TOKEN }}
+          REVIEW_API_BASE_URL: ${{ vars.REVIEW_API_BASE_URL }}
+          REVIEW_MODEL: ${{ vars.REVIEW_MODEL }}
+          REVIEW_MODEL_LARGE: ${{ vars.REVIEW_MODEL_LARGE }}
+          REVIEW_METADATA_HEADER: ${{ vars.REVIEW_METADATA_HEADER }}
+          INCREMENTAL_REVIEW_ENABLED: ${{ vars.INCREMENTAL_REVIEW_ENABLED }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          CURRENT_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bun "$SCRIPTS_DIR/coordinator/call-coordinator.ts"
+
+      # ── 9. Upload telemetry artifact ────────────────────────────────────
+      - name: Upload coordinator telemetry
+        if: always() && steps.pr.outputs.found == 'true' && steps.skip.outputs.skip != 'true' && steps.gate.outputs.proceed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coordinator-pr-${{ steps.pr.outputs.number }}-${{ github.run_id }}
+          path: |
+            /tmp/coordinator.json
+            /tmp/coordinator-raw.json
+            /tmp/coordinator-meta.json
+            /tmp/comments.json
+          retention-days: 14
+          if-no-files-found: ignore

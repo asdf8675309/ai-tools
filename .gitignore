@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+.DS_Store
+dist/
+*.log
+
+# Crucible per-repo state
+.crucible/
+crucible/node_modules/
+agent-guards/node_modules/
+pr-babysit/node_modules/

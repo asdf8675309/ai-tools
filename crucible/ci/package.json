@@ -1,0 +1,21 @@
+{
+  "name": "ci-review-pipeline",
+  "version": "1.0.0",
+  "description": "AI pull-request review pipeline for GitHub Actions: reviewer, risk-tier classifier, coordinator judge",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "scripts": {
+    "test": "bun test lib pre-pr-review coordinator noted-items && bash tier-classify/tier-classify.test.sh",
+    "test:unit": "bun test pre-pr-review coordinator noted-items",
+    "test:tier": "bash tier-classify/tier-classify.test.sh",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}

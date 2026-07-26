@@ -1,0 +1,304 @@
+{
+  "_meta": {
+    "purpose": "Hand-labeled fixture for SemanticCloneDetector --calibrate. Each pair is (function_a, function_b, label). Used to sweep cosine thresholds and find the F1-optimum for each embedding model. Re-run on every model swap.",
+    "labels": {
+      "clone": "Type-4 semantic clone — same observable behavior, different syntax/structure",
+      "non_clone": "Different observable behavior — flagging these is a false positive"
+    },
+    "categories": {
+      "function-vs-arrow":   "Imperative function vs arrow form of same operation",
+      "loop-vs-functional":  "for/while loop vs map/reduce/filter equivalent",
+      "control-flow":        "Early return vs nested-if; switch vs object lookup",
+      "async-pattern":       "async/await vs Promise.then; callback vs Promise",
+      "data-shape":          "Different data structures, same algorithm (array vs object iteration)",
+      "iteration":           "Recursive vs iterative implementation",
+      "guard-vs-validate":   "Throw on invalid vs return null/undefined; same intent",
+      "domain-different":    "Different domain entirely — strong negative example",
+      "near-miss":           "Same domain, similar surface, different behavior — hardest negative",
+      "primitive-difference":"Adjacent operations: push/pop, sort asc/desc, get/set"
+    },
+    "source": "Hand-curated 2026-05-20 for nomic-embed-text-v1.5 calibration. Functions are minimal TypeScript snippets representative of real code review surface."
+  },
+  "pairs": [
+    {
+      "id": "clone-01",
+      "label": "clone",
+      "category": "function-vs-arrow",
+      "a": "function add(a, b) { return a + b; }",
+      "b": "const sum = (x, y) => x + y;"
+    },
+    {
+      "id": "clone-02",
+      "label": "clone",
+      "category": "loop-vs-functional",
+      "a": "function total(nums) { let s = 0; for (const n of nums) s += n; return s; }",
+      "b": "const total = (nums) => nums.reduce((acc, n) => acc + n, 0);"
+    },
+    {
+      "id": "clone-03",
+      "label": "clone",
+      "category": "loop-vs-functional",
+      "a": "function doubled(arr) { const out = []; for (const x of arr) out.push(x * 2); return out; }",
+      "b": "const doubled = (arr) => arr.map(x => x * 2);"
+    },
+    {
+      "id": "clone-04",
+      "label": "clone",
+      "category": "loop-vs-functional",
+      "a": "function evens(arr) { const out = []; for (const x of arr) if (x % 2 === 0) out.push(x); return out; }",
+      "b": "const evens = (arr) => arr.filter(x => x % 2 === 0);"
+    },
+    {
+      "id": "clone-05",
+      "label": "clone",
+      "category": "control-flow",
+      "a": "function classify(n) { if (n > 0) return 'pos'; if (n < 0) return 'neg'; return 'zero'; }",
+      "b": "function classify(n) { if (n === 0) { return 'zero'; } else { if (n > 0) { return 'pos'; } else { return 'neg'; } } }"
+    },
+    {
+      "id": "clone-06",
+      "label": "clone",
+      "category": "iteration",
+      "a": "function fact(n) { if (n <= 1) return 1; return n * fact(n - 1); }",
+      "b": "function fact(n) { let r = 1; for (let i = 2; i <= n; i++) r *= i; return r; }"
+    },
+    {
+      "id": "clone-07",
+      "label": "clone",
+      "category": "iteration",
+      "a": "function fib(n) { if (n < 2) return n; return fib(n-1) + fib(n-2); }",
+      "b": "function fib(n) { let [a, b] = [0, 1]; for (let i = 0; i < n; i++) [a, b] = [b, a + b]; return a; }"
+    },
+    {
+      "id": "clone-08",
+      "label": "clone",
+      "category": "data-shape",
+      "a": "function findUser(users, id) { for (const u of users) if (u.id === id) return u; return null; }",
+      "b": "const findUser = (users, id) => users.find(u => u.id === id) ?? null;"
+    },
+    {
+      "id": "clone-09",
+      "label": "clone",
+      "category": "async-pattern",
+      "a": "async function load(url) { const r = await fetch(url); return r.json(); }",
+      "b": "function load(url) { return fetch(url).then(r => r.json()); }"
+    },
+    {
+      "id": "clone-10",
+      "label": "clone",
+      "category": "async-pattern",
+      "a": "async function loadAll(urls) { const results = []; for (const u of urls) results.push(await fetch(u)); return results; }",
+      "b": "const loadAll = (urls) => Promise.all(urls.map(u => fetch(u)));"
+    },
+    {
+      "id": "clone-11",
+      "label": "clone",
+      "category": "guard-vs-validate",
+      "a": "function divide(a, b) { if (b === 0) throw new Error('div by zero'); return a / b; }",
+      "b": "function divide(a, b) { if (!b) { throw new Error('cannot divide by zero'); } else { return a / b; } }"
+    },
+    {
+      "id": "clone-12",
+      "label": "clone",
+      "category": "control-flow",
+      "a": "function color(s) { switch (s) { case 'r': return '#f00'; case 'g': return '#0f0'; case 'b': return '#00f'; default: return '#000'; } }",
+      "b": "const COLORS = { r: '#f00', g: '#0f0', b: '#00f' }; function color(s) { return COLORS[s] ?? '#000'; }"
+    },
+    {
+      "id": "clone-13",
+      "label": "clone",
+      "category": "data-shape",
+      "a": "function groupBy(arr, key) { const out = {}; for (const item of arr) { (out[item[key]] ??= []).push(item); } return out; }",
+      "b": "const groupBy = (arr, key) => arr.reduce((acc, item) => { (acc[item[key]] ||= []).push(item); return acc; }, {});"
+    },
+    {
+      "id": "clone-14",
+      "label": "clone",
+      "category": "loop-vs-functional",
+      "a": "function max(arr) { let m = arr[0]; for (const x of arr) if (x > m) m = x; return m; }",
+      "b": "const max = (arr) => Math.max(...arr);"
+    },
+    {
+      "id": "clone-15",
+      "label": "clone",
+      "category": "control-flow",
+      "a": "function isAdult(user) { if (user.age >= 18) return true; return false; }",
+      "b": "const isAdult = (user) => user.age >= 18;"
+    },
+    {
+      "id": "clone-16",
+      "label": "clone",
+      "category": "data-shape",
+      "a": "function clone(obj) { return JSON.parse(JSON.stringify(obj)); }",
+      "b": "const clone = (obj) => structuredClone(obj);"
+    },
+    {
+      "id": "clone-17",
+      "label": "clone",
+      "category": "guard-vs-validate",
+      "a": "function getFirst(arr) { if (!arr || arr.length === 0) return null; return arr[0]; }",
+      "b": "const getFirst = (arr) => arr?.[0] ?? null;"
+    },
+    {
+      "id": "clone-18",
+      "label": "clone",
+      "category": "loop-vs-functional",
+      "a": "function names(users) { const out = []; for (const u of users) if (u.active) out.push(u.name); return out; }",
+      "b": "const names = (users) => users.filter(u => u.active).map(u => u.name);"
+    },
+    {
+      "id": "clone-19",
+      "label": "clone",
+      "category": "function-vs-arrow",
+      "a": "function double(n) { return n * 2; }",
+      "b": "const double = (n) => 2 * n;"
+    },
+    {
+      "id": "clone-20",
+      "label": "clone",
+      "category": "async-pattern",
+      "a": "function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }",
+      "b": "const sleep = (ms) => new Promise(r => setTimeout(r, ms));"
+    },
+    {
+      "id": "non_clone-01",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "function add(a, b) { return a + b; }",
+      "b": "function deletePost(id) { db.exec('DELETE FROM posts WHERE id=' + id); }"
+    },
+    {
+      "id": "non_clone-02",
+      "label": "non_clone",
+      "category": "primitive-difference",
+      "a": "function add(a, b) { return a + b; }",
+      "b": "function subtract(a, b) { return a - b; }"
+    },
+    {
+      "id": "non_clone-03",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function sortAsc(arr) { return [...arr].sort((a, b) => a - b); }",
+      "b": "function sortDesc(arr) { return [...arr].sort((a, b) => b - a); }"
+    },
+    {
+      "id": "non_clone-04",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function isAdult(user) { return user.age >= 18; }",
+      "b": "function isSenior(user) { return user.age >= 65; }"
+    },
+    {
+      "id": "non_clone-05",
+      "label": "non_clone",
+      "category": "primitive-difference",
+      "a": "function pushItem(arr, x) { arr.push(x); return arr; }",
+      "b": "function popItem(arr) { return arr.pop(); }"
+    },
+    {
+      "id": "non_clone-06",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "async function fetchUser(id) { const r = await fetch(`/users/${id}`); return r.json(); }",
+      "b": "function logAnalytics(event) { window.dataLayer.push({event, ts: Date.now()}); }"
+    },
+    {
+      "id": "non_clone-07",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function getCache(key) { return cache.get(key); }",
+      "b": "function setCache(key, value) { cache.set(key, value); }"
+    },
+    {
+      "id": "non_clone-08",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "function hashPassword(pw) { return bcrypt.hash(pw, 10); }",
+      "b": "function encryptPayload(data) { return aes.encrypt(data, key); }"
+    },
+    {
+      "id": "non_clone-09",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function validateEmail(s) { return /^[^@]+@[^@]+\\.[^@]+$/.test(s); }",
+      "b": "function formatEmail(s) { return s.trim().toLowerCase(); }"
+    },
+    {
+      "id": "non_clone-10",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "function renderHeader(props) { return <h1>{props.title}</h1>; }",
+      "b": "function calculateTax(amount, rate) { return amount * rate; }"
+    },
+    {
+      "id": "non_clone-11",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function login(user, pw) { return auth.signIn(user, pw); }",
+      "b": "function logout(session) { return auth.signOut(session); }"
+    },
+    {
+      "id": "non_clone-12",
+      "label": "non_clone",
+      "category": "primitive-difference",
+      "a": "function readFile(path) { return fs.readFileSync(path, 'utf8'); }",
+      "b": "function writeFile(path, content) { return fs.writeFileSync(path, content, 'utf8'); }"
+    },
+    {
+      "id": "non_clone-13",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "function rateLimit(req) { const key = req.ip; const count = redis.incr(key); return count > 100; }",
+      "b": "function parseJWT(token) { const [h, p, s] = token.split('.'); return JSON.parse(atob(p)); }"
+    },
+    {
+      "id": "non_clone-14",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function increment(counter) { return counter + 1; }",
+      "b": "function decrement(counter) { return counter - 1; }"
+    },
+    {
+      "id": "non_clone-15",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function findUser(users, id) { return users.find(u => u.id === id); }",
+      "b": "function findPost(posts, id) { return posts.find(p => p.id === id); }"
+    },
+    {
+      "id": "non_clone-16",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "function debounce(fn, ms) { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; }",
+      "b": "function snakeToCamel(s) { return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase()); }"
+    },
+    {
+      "id": "non_clone-17",
+      "label": "non_clone",
+      "category": "primitive-difference",
+      "a": "function openConnection(url) { return new WebSocket(url); }",
+      "b": "function closeConnection(ws) { ws.close(); }"
+    },
+    {
+      "id": "non_clone-18",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function serializeUser(u) { return JSON.stringify({id: u.id, name: u.name}); }",
+      "b": "function parseUser(s) { const o = JSON.parse(s); return { id: o.id, name: o.name }; }"
+    },
+    {
+      "id": "non_clone-19",
+      "label": "non_clone",
+      "category": "domain-different",
+      "a": "function compress(data) { return gzip.compress(data); }",
+      "b": "function validateSchema(obj, schema) { return ajv.validate(schema, obj); }"
+    },
+    {
+      "id": "non_clone-20",
+      "label": "non_clone",
+      "category": "near-miss",
+      "a": "function add(a, b) { return a + b; }",
+      "b": "function concat(a, b) { return a + b; }"
+    }
+  ]
+}

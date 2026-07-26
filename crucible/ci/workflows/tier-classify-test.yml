@@ -1,0 +1,49 @@
+name: Tier Classifier Tests
+
+# Regression tests for tier-classify.yml, which decides whether the review
+# workflows run at all — so a silent regression there disables a review surface
+# without disabling any check. See tier-classify/README.md.
+#
+# `push` as well as `pull_request` on purpose: shell and git behaviour differs
+# across machines, so the suite must run somewhere other than one developer's
+# laptop. The overlap on a PR branch is one extra ~20s paths-filtered run.
+#
+# Make this a REQUIRED check if you can. As a non-required check it has the same
+# weakness as any other: a crashed run and a clean run look alike on the PR.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/tier-classify.yml'
+      - '.github/workflows/tier-classify-test.yml'
+      - '.github/tier-classify/**'
+  pull_request:
+    paths:
+      - '.github/workflows/tier-classify.yml'
+      - '.github/workflows/tier-classify-test.yml'
+      - '.github/tier-classify/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier-classify-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run tier-classify regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # No git identity step: the suite's git_init() sets user.email/user.name on
+      # each throwaway fixture, so no global config is needed.
+      #
+      # No dependency install: the suite extracts the workflow's run block with
+      # python3 (preinstalled) rather than a YAML package, precisely so it can
+      # run here with no install step.
+      - name: Run tests
+        run: bash .github/tier-classify/tier-classify.test.sh

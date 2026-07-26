@@ -1,0 +1,51 @@
+name: Review Pipeline Tests
+
+# Unit tests for the review pipeline's own scripts. A review pipeline with no
+# tests of its own is the exact failure mode it exists to prevent: a check that
+# passes without testing the thing it claims to test is indistinguishable from
+# one that works.
+#
+# Make this a REQUIRED check. The reviewer and coordinator are NOT required
+# checks — that is deliberate, since a model outage should not block merges — so
+# this suite is the only gate that fails loudly when their logic breaks.
+
+on:
+  push:
+    paths:
+      - '.github/pre-pr-review/**'
+      - '.github/coordinator/**'
+      - '.github/noted-items/**'
+      - '.github/workflows/review-pipeline-test.yml'
+  pull_request:
+    paths:
+      - '.github/pre-pr-review/**'
+      - '.github/coordinator/**'
+      - '.github/noted-items/**'
+      - '.github/workflows/review-pipeline-test.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-pipeline-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run review-pipeline unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.2"
+
+      # No install step: the tests import only bun:test and node builtins, so
+      # they run against a bare checkout. `bun install` would only be needed for
+      # the typecheck, which is not run here.
+      - name: Run unit tests
+        run: bun test .github/lib .github/pre-pr-review .github/coordinator .github/noted-items

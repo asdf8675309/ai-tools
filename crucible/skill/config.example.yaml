@@ -1,0 +1,226 @@
+# Crucible — a worked non-default configuration
+#
+# `config.yaml` ships Claude-only so the skill runs the moment you copy it:
+# no account, no key, no server. That default is for adoption, not because it
+# is the best configuration.
+#
+# This file is the other end — roughly how it gets run once the optional
+# integrations are wired up. Copy the parts you want into your own
+# `config.yaml`, or into a `.crucible.yaml` at a repo root to scope it to one
+# project.
+#
+# WHY BOTHER: the skill's founding argument is that agreement between
+# independently-failing reviewers is the strongest signal a finding is real.
+# Ten reviewers from one model family share failure modes — they miss the same
+# things and hallucinate in the same directions. A cross-family panel is the
+# configuration that argument actually implies. The defaults do not deliver it;
+# this does.
+#
+# THE TWO CONFIGURATIONS, SIDE BY SIDE
+#
+#   role                 config.yaml (shipped)   this file
+#   ───────────────────  ──────────────────────  ─────────────────────────────
+#   code quality         sonnet                  sonnet          (nothing beat it)
+#   security             sonnet                  a second vendor (highest-stakes lens)
+#   simplify             sonnet                  gemini-class    (0% vs 8% spurious)
+#   typescript           sonnet                  gemini-class    (0% vs 31% spurious)
+#   platform             sonnet                  sonnet
+#   test runner          sonnet                  external CLI    (0% over 10 samples)
+#   clone detector       sonnet (heuristic)      local embeddings (true Type-4)
+#   ci tamper            haiku                   haiku           (pattern-match; smallest wins)
+#   history / continuity sonnet                  sonnet
+#   ───────────────────  ──────────────────────  ─────────────────────────────
+#   disprove (primary)   haiku                   haiku
+#   disprove (2nd vote)  none                    gemini-class    (gates CRITICAL/HIGH)
+#   ───────────────────  ──────────────────────  ─────────────────────────────
+#   needs                nothing                 a gateway + key, a local
+#                                                embedding server, a CLI
+#
+# What the left column still gives you: the full eleven-phase pipeline, both
+# passes, the codebase-pattern baseline, the deny-list, every filter, all ten
+# lenses. It is not a demo — it is the whole architecture on one model family.
+#
+# What the right column adds: reviewers that fail *differently* from each
+# other, and a second vendor that must independently fail to disprove a
+# CRITICAL or HIGH before it reaches you. That is the difference between one
+# model checking its own work ten times and two vendors disagreeing in public.
+#
+# Start on the left. Move right when the false positives you are still seeing
+# look like the kind one model family would share.
+#
+# READ THE EVAL CAVEATS FIRST — CREDITS.md § Model selection. The assignments
+# below come from a small precision pilot (n=5–10 diffs per model/role), judged
+# by a model, measuring spurious findings on clean code only. It says nothing
+# about what each model MISSED. Model versions move. Treat every line here as
+# "what one person measured once," not as a recommendation, and re-run your own
+# evaluation before trusting any of it.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reviewer assignment — deliberately mixed
+# ─────────────────────────────────────────────────────────────────────────────
+models:
+  # Sonnet held the incumbent slot on precision here; nothing beat it.
+  reviewer_code_quality:      claude-sonnet
+
+  # A different vendor on the highest-stakes lens, on purpose. Security is
+  # where a shared blind spot costs the most, so it is the first place worth
+  # spending vendor diversity.
+  reviewer_security:          gateway-gpt
+
+  # Swapped on measured precision: 0% spurious against Sonnet's 8%, and it
+  # found MORE legitimate issues, not fewer.
+  reviewer_simplify:          gateway-gemini-flash
+
+  # The most counterintuitive result in the pilot and the reason per-role
+  # assignment exists at all. The incumbent was the WORST model tested on this
+  # role — 31% spurious, flagging type problems in clean TypeScript — while a
+  # much cheaper model scored 0% and found more real issues.
+  reviewer_typescript:        gateway-gemini-flash
+
+  reviewer_platform:          claude-sonnet
+
+  # Runs the suite and reads failures. An external reasoning CLI scored 0%
+  # spurious across 10 samples with 40 legitimate findings — the strongest
+  # single result in the pilot.
+  reviewer_test_runner:       cli-alt-vendor
+
+  # Real Type-4 clone detection needs embeddings. Local: free, private, and
+  # nothing about your codebase leaves the machine.
+  reviewer_clone_detector:    local-embed
+
+  # Pure YAML pattern-matching. The smallest model is correct here; a larger
+  # one is spend with no gain.
+  reviewer_ci_tamper:         claude-haiku
+
+  reviewer_history_analyzer:  claude-sonnet
+  reviewer_pr_continuity:     claude-sonnet
+
+  # Pass 2. The primary verdict stays on a small fast model — the disprove task
+  # is narrow and well-specified, which is what small models are good at.
+  disprove_primary:           claude-haiku
+
+  # The cross-vendor second opinion, and the whole point of the exercise: on
+  # CRITICAL and HIGH, a finding survives only if BOTH models fail to disprove
+  # it. Two independent failure modes have to agree before you are interrupted.
+  disprove_cross_vendor:      gateway-gemini-flash
+
+  embedding_primary:          local-embed
+
+# The final rung must stay claude-* — it dispatches as a local subagent with no
+# external dependency, so a reviewer slot can never go empty. Order matters:
+# vendor-diverse first (survives one vendor's outage), gateway-free last.
+reviewer_fallback_chain:
+  - gateway-gemini-flash
+  - claude-sonnet
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider-key maps
+# ─────────────────────────────────────────────────────────────────────────────
+claude_model_map:
+  claude-opus:   opus
+  claude-sonnet: sonnet
+  claude-haiku:  haiku
+
+# Model strings are whatever your endpoint expects. These are the shapes a
+# gateway fronting multiple vendors typically uses — check yours.
+gateway_model_map:
+  gateway-gemini-flash: google-ai-studio/gemini-3-flash-preview
+  gateway-gpt:          openai/gpt-5.5
+  gateway-embedding:    openai/text-embedding-3-small
+
+local_model_map:
+  local-embed:
+    endpoint: http://localhost:1234/v1
+    model: text-embedding-nomic-embed-text-v1.5
+    dim: 768
+
+external_cli_map:
+  cli-alt-vendor:
+    command: codex
+    args: ["exec"]
+    reasoning_effort: high
+    fallback: claude-sonnet
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Integrations
+# ─────────────────────────────────────────────────────────────────────────────
+integrations:
+  # NOTE the api_key_env / base_url_env pattern: these are the NAMES of
+  # environment variables. Never put a key, an account identifier, or a private
+  # endpoint in this file — it is the file most likely to get committed.
+  gateway:
+    enabled: true
+    # REQUIRED — a literal URL. There is no env-var fallback for this one:
+    # `api_key_env` supplies the key, but the endpoint is read from here, and an
+    # empty value makes the whole gateway integration unavailable. Every
+    # `gateway-*` role then silently falls back to a Claude subagent and the
+    # cross-vendor disprove never fires — the config would look applied while
+    # buying you none of what this file is for.
+    base_url: "https://your-gateway.example/v1"
+    api_key_env: "CRUCIBLE_GATEWAY_TOKEN"
+    timeout_ms: 60000
+
+  local_models:
+    enabled: true
+
+  external_cli:
+    enabled: true
+
+  # Accrues the data needed to answer "is the cheap model safe in the
+  # authoritative disprove slot?" empirically rather than by argument. Without
+  # this, that question stays a matter of taste.
+  verdict_log:
+    enabled: true
+    path: ".crucible/verdicts.jsonl"
+
+  # An extra deep-security phase. Off here — it is the heaviest thing in the
+  # repo (Docker, a Postgres index per project, per-scan spend) and worth
+  # turning on per-project rather than globally.
+  #
+  # If you do enable it, read the reaper warning in config.yaml first:
+  # quitting Docker Desktop stops EVERY container on the machine, not only
+  # this integration's. Set idle_reap_minutes: 0 if you run anything else in
+  # Docker.
+  metis:
+    enabled: false
+    compose_dir: ""
+    llm:
+      base_url_env: "OPENAI_BASE_URL"
+      api_key_env: "OPENAI_API_KEY"
+    idle_reap_minutes: 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Everything below matches the shipped defaults and is repeated only so this
+# file works standalone. Change these deliberately, not by copying.
+# ─────────────────────────────────────────────────────────────────────────────
+light_path:
+  enabled: true
+  allow_extensions: [".md", ".txt", ".rst"]
+  allow_paths: []
+  max_loc: 1000
+
+risk_tiers:
+  # Extends the hardcoded baseline; it cannot replace or disable it. Add the
+  # paths your project treats as privileged — admin routes, anything ingesting
+  # untrusted input, the config that steers review itself.
+  sensitive_paths: []
+
+thresholds:
+  confidence_floor:                   80
+  per_reviewer_cap:                   5
+  large_pr_warn_loc:                  400
+  large_pr_block_loc:                 1000
+  cross_vendor_disprove_min_severity: HIGH
+  clone_mrs_threshold:                0.80   # recalibrate per embedding model — see docs/ClonePatterns.md in the repository (not shipped with the installed skill)
+  removal_tracking_max_ratio:         3.0
+
+flags:
+  packet_input:                    true
+  yaml_output_contract:            true
+  scope_constrain_split_severity:  true
+  fail_on_revert_gate:             true
+  auto_route_delta_review:         true
+  python_tabify:                   true
+  agent_author_profile:            true
+  # The reason most of the above exists.
+  cross_vendor_disprove:           true

@@ -267,7 +267,7 @@ bash tools/metis/scan-diff.sh "$(git rev-parse --show-toplevel)" /tmp/crucible-r
 
 Spawn ALL 10 reviewers in a **single message with 10 parallel `Agent` tool-use blocks**. Each gets:
 
-> **Watch the fan-out against your own rate limits — this is where a review silently degrades.** At sixteen concurrent agents one round here completed 4 of 16; at batches of three it completed 16 of 16. The failures do not announce themselves as rate limiting: a throttled agent never finishes its turn, so the runtime reports it as a structured-output failure and you spend the next hour on schema shape. If you hit that, batch (`REVIEWER_BATCH`, default 3 in the journaled edition) — the cost is a few queued rounds of wall-clock, not correctness. Whatever you choose, the Phase 5 reliability gate is what stops a degraded fleet from rendering as a confident APPROVE; do not disable it to make a round look clean.
+> **Watch the fan-out against your own rate limits — this is where a review silently degrades.** At sixteen concurrent agents one round here completed 4 of 16; at batches of three it completed 16 of 16. The failures do not announce themselves as rate limiting: a throttled agent never finishes its turn, so the runtime reports it as a structured-output failure and you spend the next hour on schema shape. The knob is `thresholds.reviewer_batch` (default `auto`): the journaled edition fans out fully, then retries only the failed passes at `reviewer_batch_retry` before giving up, so a throttled round usually heals itself. Set it to an integer to pin the batch size if you already know your ceiling. On this prose path there is no automatic retry — if passes come back empty, dispatch the missing reviewers again in groups of three or four. Either way the Phase 5 reliability gate is what stops a degraded fleet from rendering as a confident APPROVE; do not disable it to make a round look clean.
 
 1. The git diff command (`git diff origin/main...HEAD` or fallback)
 2. The list of changed files to read in full
@@ -424,7 +424,7 @@ for (const reviewer of REVIEWERS) {
 }
 ```
 
-Yes, that's 20 parallel agents in one message at full fan-out. Wall-clock is still roughly one Pass-1-of-single-pass since each is independent. Cost goes up modestly (10 → 20 calls, but each is shorter because the scope is narrower). If your Claude Code plan enforces a concurrent-subagent limit, batch the dispatch instead of firing all 20 at once — see `WorkflowMode.md`'s `REVIEWER_BATCH` pattern for the journaled edition.
+Yes, that's 20 parallel agents in one message at full fan-out. Wall-clock is still roughly one Pass-1-of-single-pass since each is independent. Cost goes up modestly (10 → 20 calls, but each is shorter because the scope is narrower). If your Claude Code plan enforces a concurrent-subagent limit, batch the dispatch instead of firing all 20 at once — `thresholds.reviewer_batch` in `config.yaml`, or see `WorkflowMode.md` for how the journaled edition auto-retries.
 
 ---
 

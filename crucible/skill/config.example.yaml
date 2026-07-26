@@ -212,6 +212,11 @@ thresholds:
   large_pr_block_loc:                 1000
   cross_vendor_disprove_min_severity: HIGH
   clone_mrs_threshold:                0.80   # recalibrate per embedding model — see docs/ClonePatterns.md in the repository (not shipped with the installed skill)
+  reviewer_batch:                     4      # pinned rather than `auto`: this panel runs a gateway
+                                             # vendor and an external CLI alongside the Claude fleet,
+                                             # so the first round is rate-limited often enough that
+                                             # paying the batching cost up front beats retrying.
+  reviewer_batch_retry:               2
   removal_tracking_max_ratio:         3.0
 
 flags:

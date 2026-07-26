@@ -285,6 +285,11 @@ thresholds:
   cross_vendor_disprove_min_severity: HIGH   # severity floor for the second disprove opinion
   clone_mrs_threshold:                0.80   # semantic clone Max Redundancy Score; recalibrate per embedding model
   removal_tracking_max_ratio:         3.0    # added/removed LOC ratio at or above which R12 emits a structural candidate
+  reviewer_batch:                     auto   # Phase 3 concurrency. `auto` = fan out fully, then retry
+                                             # failed passes once at reviewer_batch_retry before giving up.
+                                             # An integer pins the batch size instead — use it if you
+                                             # already know your account's request-rate ceiling.
+  reviewer_batch_retry:               3      # batch size for the `auto` retry round
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature flags

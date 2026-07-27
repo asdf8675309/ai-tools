@@ -1,9 +1,27 @@
-node_modules/
+
 .env
 .env.*
+*.env
 .DS_Store
 dist/
 *.log
+.claude
+node_modules
+.npm
+.yarn
+.pnp.*
+tmp/
+temp/
+*.tmp
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+*_rsa
+*_rsa.pub
+*.crt
+*.cer
 
 # Local index / per-repo state
 .codegraph/

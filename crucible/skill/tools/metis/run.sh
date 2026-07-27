@@ -174,6 +174,8 @@ case "${METIS_COMMAND%% *}" in
 esac
 
 if [ "$SCHEMA_EXISTS" = "1" ] || [ "$NEEDS_INDEX_TOOL" = "1" ]; then
+  # shellcheck disable=SC2054
+  # The comma is Metis's own list separator for --tools, not an array separator.
   METIS_FLAGS+=(--tools index,navigation)
 fi
 if [ "$SCHEMA_EXISTS" = "1" ]; then INDEX_NOTE="indexed"; else INDEX_NOTE="not indexed"; fi

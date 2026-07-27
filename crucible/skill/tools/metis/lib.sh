@@ -1,3 +1,11 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034
+# Two directives, both because this file is sourced rather than executed:
+#   shell=bash  — it has no shebang by design, so shellcheck cannot infer a dialect.
+#   SC2034      — every CRUCIBLE_METIS_* value below is read by the five scripts
+#                 that source this one (ensure-up, reap, run, scan, scan-diff),
+#                 which shellcheck cannot see from here. They are not unused.
+#
 # Shared helpers for the Metis integration scripts. Sourced, never executed.
 #
 # Every value these scripts hand to `docker` comes from config.yaml by way of

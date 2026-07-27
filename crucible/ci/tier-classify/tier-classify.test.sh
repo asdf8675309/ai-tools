@@ -132,7 +132,7 @@ git_init() {
 # spurious hit, and nothing proves the ref-spec itself is load-bearing.
 FD="$WORK/fixture-d"; mkdir -p "$FD"; git_init "$FD"
 (
-  cd "$FD"
+  cd "$FD" || exit 1
   mkdir -p packages/auth
   echo base > a.ts; echo base > b.ts; echo base > c.ts
   echo base > packages/auth/token.ts
@@ -148,7 +148,7 @@ FD="$WORK/fixture-d"; mkdir -p "$FD"; git_init "$FD"
   git add -A; git commit -qm "base lands the same sensitive edit, plus its own file"
 )
 D_MAIN=$(git -C "$FD" rev-parse main); D_PR=$(git -C "$FD" rev-parse pr)
-cd "$FD"
+cd "$FD" || exit 1
 got=$(run "$WORK/step.sh" "$D_MAIN" "$D_PR" 4)
 [ "$got" = "full 1" ] && ok "defect1: three-dot sees the PR's own sensitive file" \
                       || bad "defect1: three-dot sees the PR's own sensitive file" "full 1" "$got"
@@ -412,7 +412,7 @@ p="$(sed -n 's/^has_pkg_bump=//p' "$out")"
 # ── Defect 3: rename hides the sensitive source path ─────────────────────────
 FR="$WORK/fixture-rename"; mkdir -p "$FR"; git_init "$FR"
 (
-  cd "$FR"
+  cd "$FR" || exit 1
   mkdir -p packages/auth apps/x
   printf 'secret\n' > packages/auth/token.ts
   echo base > base.txt; git add -A; git commit -qm base
@@ -420,7 +420,7 @@ FR="$WORK/fixture-rename"; mkdir -p "$FR"; git_init "$FR"
   git mv packages/auth/token.ts apps/x/token.ts
   git commit -qm "pure rename out of a sensitive directory"
 )
-cd "$FR"
+cd "$FR" || exit 1
 got=$(run "$WORK/step.sh" "$(git rev-parse main)" "$(git rev-parse pr)" 1)
 [ "$got" = "full 1" ] && ok "defect3: pure git mv out of packages/auth -> full" \
                       || bad "defect3: pure git mv out of packages/auth -> full" "full 1" "$got"
@@ -428,7 +428,7 @@ got=$(run "$WORK/step.sh" "$(git rev-parse main)" "$(git rev-parse pr)" 1)
 # ── Defect 4: git C-quotes awkward paths, defeating ^-anchored regexes ───────
 FQ="$WORK/fixture-quote"; mkdir -p "$FQ"; git_init "$FQ"
 (
-  cd "$FQ"
+  cd "$FQ" || exit 1
   mkdir -p packages/auth migrations
   echo base > base.txt; git add -A; git commit -qm base
   git checkout -qb pr
@@ -438,7 +438,7 @@ FQ="$WORK/fixture-quote"; mkdir -p "$FQ"; git_init "$FQ"
   printf 'x\n' > "migrations/002_eq\\uip.sql"
   git add -A; git commit -qm "paths git would C-quote"
 )
-cd "$FQ"
+cd "$FQ" || exit 1
 got=$(run "$WORK/step.sh" "$(git rev-parse main)" "$(git rev-parse pr)" 4)
 [ "$got" = "full 4" ] && ok "defect4: non-ASCII/backslash/quote paths still classify" \
                       || bad "defect4: non-ASCII/backslash/quote paths still classify" "full 4" "$got"
@@ -448,14 +448,14 @@ got=$(run "$WORK/step.sh" "$(git rev-parse main)" "$(git rev-parse pr)" 4)
 # GITHUB_OUTPUT.
 FN="$WORK/fixture-newline"; mkdir -p "$FN"; git_init "$FN"
 (
-  cd "$FN"
+  cd "$FN" || exit 1
   echo base > base.txt; git add -A; git commit -qm base
   git checkout -qb pr
   mkdir -p "$(printf 'apps/ev\nil/src')"
   printf 'x\n' > "$(printf 'apps/ev\nil/src/a.ts')"
   git add -A; git commit -qm "newline in path"
 )
-cd "$FN"
+cd "$FN" || exit 1
 out="$(mktemp)"
 BASE_SHA="$(git rev-parse main)" HEAD_SHA="$(git rev-parse pr)" CHANGED_FILES=1 \
   GITHUB_OUTPUT="$out" bash "$WORK/step.sh" >/dev/null 2>&1

@@ -1,0 +1,126 @@
+name: CI
+
+# This repo argues that a check which cannot fail is not a check. Running none on
+# itself would be the first thing a careful reader notices.
+#
+# Deliberately narrow: the test suites, the typechecks, and a shell lint. No
+# secrets, no model calls, nothing that can go red for a reason unrelated to the
+# code — a CI that fails on rate limits trains people to ignore it, which is the
+# failure mode `crucible/OPERATING-LESSONS.md` opens on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing here writes to the repo, and a fork PR gets a read-only
+# token regardless — so this is the permission set that actually holds.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [agent-guards, crucible, crucible/ci]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          # The README's stated floor. Pinning it means CI tests the version the
+          # docs promise, not whatever `latest` happens to be that week.
+          bun-version: "1.3"
+
+      # No `bun install` on purpose. The READMEs claim `bun test` works on a fresh
+      # clone with nothing installed; this job is what makes that claim
+      # falsifiable. If a runtime dependency ever creeps in, this goes red on the
+      # commit that added it rather than on some adopter's machine.
+      #
+      # `bun run test`, not bare `bun test`: each package's own script is the
+      # invocation of record, and crucible/ci's chains a shell suite that a bare
+      # invocation would skip entirely.
+      - name: bun run test (no install)
+        working-directory: ${{ matrix.package }}
+        run: bun run test
+
+  typecheck:
+    name: Typecheck (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [agent-guards, crucible, crucible/ci]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      # Typecheck DOES need the dev-only type definitions — that is exactly the
+      # split the READMEs describe. Installing here and not in the test job keeps
+      # the two claims independently verified instead of tangled.
+      - run: bun install --frozen-lockfile
+        working-directory: ${{ matrix.package }}
+
+      # Never a bare `tsc --noEmit` — this repo ships a guard that blocks it, and
+      # running the thing your own guard forbids is a detail a reader checks.
+      - name: bun run typecheck
+        working-directory: ${{ matrix.package }}
+        run: bun run typecheck
+
+  shell:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: shellcheck + bash -n
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # Found via git rather than a glob, so a script in a new directory is
+          # covered the day it lands instead of whenever someone updates a path.
+          mapfile -t SCRIPTS < <(git ls-files '*.sh')
+          printf 'linting %d scripts\n' "${#SCRIPTS[@]}"
+          for s in "${SCRIPTS[@]}"; do bash -n "$s"; done
+          shellcheck --severity=warning "${SCRIPTS[@]}"
+
+  # One stable required check for branch protection. Listing matrix jobs
+  # individually rots the moment a package is added, and dynamically-named matrix
+  # entries cannot be listed statically at all — the exact required-checks failure
+  # `crucible/OPERATING-LESSONS.md` describes.
+  ci-passed:
+    name: CI Passed
+    if: always()
+    needs: [test, typecheck, shell]
+    runs-on: ubuntu-latest
+    steps:
+      # Every upstream result is checked explicitly. A skipped or cancelled
+      # dependency must not read as success — that is the "workflow whose steps
+      # all skip still reports success" failure this repo documents.
+      - name: Verify all jobs succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          echo "upstream results: $RESULTS"
+          case "$RESULTS" in
+            *failure*|*cancelled*|*skipped*)
+              echo "::error::CI did not pass cleanly — $RESULTS"
+              exit 1 ;;
+          esac
+          echo "all upstream jobs succeeded"

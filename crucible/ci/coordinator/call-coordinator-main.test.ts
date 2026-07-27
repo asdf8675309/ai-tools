@@ -322,15 +322,15 @@ describe("main — model call failures", () => {
   // scrub, and upstreams do echo request headers back in error payloads.
   test("a token echoed in the error body never reaches the public comment", async () => {
     respond = async () =>
-      new Response('{"error":"bad key","request":{"authorization":"Bearer sk-ant-abcdef0123456789"}}', {
+      new Response('{"error":"bad key","request":{"authorization":"Bearer sk-ant-EXAMPLEnotreal0123456789"}}', {
         status: 401,
       });
     const { stderr } = await run();
     const body = postedBody();
     expect(body).toContain("HTTP 401");
     expect(body).toContain("Bearer [REDACTED]");
-    expect(body).not.toContain("sk-ant-abcdef0123456789");
-    expect(stderr).not.toContain("sk-ant-abcdef0123456789");
+    expect(body).not.toContain("sk-ant-EXAMPLEnotreal0123456789");
+    expect(stderr).not.toContain("sk-ant-EXAMPLEnotreal0123456789");
   });
 
   test("a transport failure posts DEGRADED rather than crashing the job", async () => {

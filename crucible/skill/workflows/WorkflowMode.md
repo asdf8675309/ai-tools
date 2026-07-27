@@ -8,10 +8,37 @@
 > it. It is the largest unverified artifact here; treat changes to it as
 > needing a real run to validate, not a green suite.
 
-The native dynamic-workflow edition of Crucible. Ports the eleven-phase prose review
+The native dynamic-workflow edition of Crucible. Ports the prose review
 (`FullReview.md`) into a journaled JS orchestration script so the run is
 **resumable** and **observable in the `/workflows` TUI**, with intermediate
 candidate lists held in script variables instead of the parent context window.
+
+## Parity with `FullReview.md`
+
+Both editions run the same two-pass architecture, the same ten reviewers, the
+same disprove pass, the same Phase 5 filters, and the same optional Metis phase.
+Where they still differ, they differ on purpose or they differ pending work —
+and this list says which, because "ports the review" without qualification sent
+readers looking for phases that were not there.
+
+| Behaviour | Prose | Script |
+|---|---|---|
+| CRITICAL injection halts before auto-fix | yes | yes |
+| Metis (Phase 2.5), off by default | yes | yes |
+| Reliability gate — degraded fleet cannot APPROVE | **no** | yes |
+| Concurrency retry on a throttled round | no | yes |
+| Light-path skip for inert diffs | yes | **no** |
+| `DeltaReview` auto-route | yes | **no** |
+| Fail-on-revert gate | yes | **no** |
+| `Crucible-Reviewer:` dispatch tag | yes | **no** |
+| Deny-list applied before the per-reviewer cap | yes | **no** — cap runs first |
+
+Two of those are worth knowing before you pick an edition. The script has the
+**reliability gate** and the prose does not, which means only the script refuses
+to emit APPROVE when a material fraction of reviewer passes died — the failure
+`OPERATING-LESSONS.md` calls the most dangerous one a review tool has. And the
+script has **no reviewer tag**, so a `/crucible-wf` run cannot satisfy the
+optional enforcement hook in `hooks/`; use the prose path if you gate on that.
 
 This is **additive**. `FullReview.md`, `SecurityOnly.md`, and `DeltaReview.md`
 remain the stable prose path. Reach for this edition when you want resume,

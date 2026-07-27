@@ -1,9 +1,10 @@
 export const meta = {
   name: 'crucible-wf',
-  description: 'Crucible pre-merge code review as a native dynamic workflow: eleven-phase two-pass identify-then-filter pipeline with full feature parity (gateway reviewers, cross-vendor disprove, local clone detector) and autopilot fix+commit. Orchestration runs in the script; every reviewer/disprove/fix is a journaled agent() call, so the run is resumable and observable via /workflows.',
+  description: 'Crucible pre-merge code review as a native dynamic workflow: the two-pass identify-then-filter pipeline (gateway reviewers, cross-vendor disprove, local clone detector, optional Metis scan) with autopilot fix+commit. Orchestration runs in the script; every reviewer/disprove/fix is a journaled agent() call, so the run is resumable and observable via /workflows. Differences from the prose FullReview.md are listed under "Parity with FullReview.md" below.',
   phases: [
     { title: 'Preflight', detail: 'resolve config + eligibility + pattern survey + review packet' },
     { title: 'Verify', detail: 'build + typecheck + tests fast-fail gate' },
+    { title: 'Metis', detail: 'optional second security opinion (Phase 2.5, off by default)' },
     { title: 'Review', detail: 'Pass 1 parallel enumeration → Pass 2 per-finding disprove (pipelined)' },
     { title: 'Consolidate', detail: 'JS filter + semantic deny-list + dedup' },
     { title: 'Fix', detail: 'autopilot apply CRITICAL/HIGH, re-verify, file issue, commit (branch-railed)' },
@@ -170,6 +171,22 @@ const CANDIDATES_SCHEMA = {
         },
       },
     },
+  },
+}
+
+// Metis (Phase 2.5). `ran` is the load-bearing field, for the same reason the
+// external-CLI wrapper below carries `ok`: scan-diff.sh always exits 0 and emits
+// nothing on stdout when it cannot run, so "Metis found nothing" and "Metis never
+// ran" are byte-identical at the shell. Conflating them is how a silently-absent
+// security pass reads as a clean one, which is the failure this whole repo is
+// about. The report prints them differently.
+const METIS_SCHEMA = {
+  type: 'object',
+  required: ['ran', 'candidates'],
+  properties: {
+    ran: { type: 'boolean' },
+    skip_reason: { type: 'string' },
+    candidates: CANDIDATES_SCHEMA.properties.candidates,
   },
 }
 
@@ -382,6 +399,43 @@ if (!verify || !verify.pass) {
 }
 
 log('Verification gate passed — build + typecheck + tests green.')
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE: Metis (Phase 2.5 — optional second security opinion, off by default)
+// ─────────────────────────────────────────────────────────────────────────────
+// A second security opinion from different machinery — whole-repo RAG context and
+// deterministic reachability — rather than a second sample from the same model.
+// That difference is the entire reason it earns a phase.
+//
+// scan-diff.sh self-gates on `integrations.metis.enabled` (ships false) and
+// ALWAYS exits 0, so calling it unconditionally is safe: on a default checkout it
+// prints one line to stderr and returns nothing. No `if enabled` wrapper needed
+// here, and nothing installs or downloads on a bare clone.
+phase('Metis')
+
+const metis = await agent(
+  `You are the Crucible Metis phase (Phase 2.5) — an optional second security opinion.
+
+Run exactly this, from the repository root, and do not substitute a variant:
+
+  git diff origin/main...HEAD > /tmp/crucible-review.diff
+  bash "${skillPath('tools/metis/scan-diff.sh')}" "$(git rev-parse --show-toplevel)" /tmp/crucible-review.diff
+
+The script always exits 0 by design. Read its OUTPUT, never its exit code.
+
+- Non-empty stdout is Metis's JSON findings. Set ran:true and map each issue onto the candidate contract: reviewer is irrelevant here, \`issue\` becomes the finding title, \`reasoning\` becomes evidence, and \`cwe\`/\`mitigation\` become recommendation context. Metis passes \`confidence\` through WITHOUT normalizing it — read the emitted value and convert it to the 0-100 scale, do not assume a scale.
+- Empty stdout means the scan did not run. Set ran:false and put the one-line stderr reason in skip_reason. Do NOT report this as "no security findings" — those are different states and the report prints them differently.
+
+Return candidates:[] with ran:true only if Metis genuinely ran and found nothing.${IN_REPO}`,
+  { label: 'metis', phase: 'Metis', agentType: 'general-purpose', model: 'haiku', schema: METIS_SCHEMA }
+)
+
+const metisRan = metis?.ran === true
+const metisSkipReason = metis?.skip_reason || (metis ? 'scan-diff.sh returned no findings and no reason' : 'metis phase agent failed')
+const metisRaw = metisRan ? (metis.candidates ?? []) : []
+log(metisRan
+  ? `Metis ran — ${metisRaw.length} raw candidate(s) before Pass 2.`
+  : `Metis skipped — ${metisSkipReason}. This is NOT "no security findings".`)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PHASE: Review (Pass 1 enumerate → Pass 2 disprove, pipelined)
@@ -638,6 +692,49 @@ if (prescanFindings.length > 0) {
   log(`Injection pre-scan merged ${prescanFindings.length} deterministic candidate(s) into the finding set.`)
 }
 
+// HALT on a CRITICAL injection candidate. FullReview.md Phase 1.75 routing rule 1
+// requires this — "the review halts and reports; it does not proceed to Phase 6
+// auto-fix" — and until now this script did the opposite: a CRITICAL injection
+// finding flowed into fixTargets and reached the autopilot fix agent.
+//
+// Why halting is the right disposition and not over-caution: a CRITICAL match
+// means the diff is trying to steer the reviewer. Handing that same diff to an
+// agent with write access, to "fix" a finding the diff itself may have authored,
+// is the one action you least want to automate. Report it and stop.
+//
+// Fixtures are exempt by construction — the scanner already downgrades matches
+// inside a declared corpus to LOW, so a diff touching injection test data cannot
+// halt on its own test data.
+const criticalInjections = prescanFindings.filter((c) => c.severity === 'CRITICAL')
+if (criticalInjections.length > 0) {
+  log(`Crucible HALTED — ${criticalInjections.length} CRITICAL prompt-injection candidate(s) in the diff. Reporting without auto-fix.`)
+  return {
+    verdict: 'BLOCK',
+    halted: true,
+    haltReason: 'critical-injection',
+    findings: allJudged,
+    injections: criticalInjections.map((c) => ({ file: c.file, line: c.line, evidence: c.evidence })),
+    note: 'Prompt-injection content detected in the diff. Findings are reported; no auto-fix was attempted, because the diff under review may have authored the instruction being fixed.',
+  }
+}
+
+// ── METIS MERGE (Phase 2.5 → Pass 2) ─────────────────────────────────────────
+// Metis candidates are candidates, not verdicts. A scanner built on different
+// machinery still produces false positives, so they go through the same disprove
+// pass and the same Phase 5 filters — deny-list and per-reviewer cap included —
+// exactly as if a Pass 1 reviewer had produced them. That filter is what makes
+// any finding here worth reading.
+//
+// Weighting is deliberately flat: a surviving Metis CRITICAL counts the same as a
+// Crucible CRITICAL in the Phase 7 verdict. Source is provenance, not a discount.
+if (metisRaw.length > 0) {
+  const judged = await disproveStage({ reviewer: 'metis', candidates: metisRaw })
+  if (judged) {
+    allJudged.push(...judged)
+    log(`Metis: ${judged.length} candidate(s) through Pass 2.`)
+  }
+}
+
 // ── REMOVAL-TRACKING GATE MERGE (R12) ────────────────────────────────────────
 // Unlike the injection pre-scan, this one IS disprove-eligible — it is a
 // measurement, and a measurement can be wrong (generated files, a pure rename).
@@ -798,6 +895,9 @@ ${fmt(highs)}
 
 ## MEDIUM / LOW
 ${fmt(mediumsLows)}
+
+## Metis
+${metisRan ? `Ran — ${metisRaw.length} candidate(s) before Pass 2, ${finalFindings.filter((f) => f.reviewer === 'metis').length} surviving.` : `**Skipped** — ${metisSkipReason}. This is not "no security findings"; the second opinion did not run.`}
 
 ## Verification Criteria (paste into PR description)
 \`\`\`

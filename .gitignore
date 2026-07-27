@@ -5,7 +5,8 @@ node_modules/
 dist/
 *.log
 
-# Crucible per-repo state
+# Local index / per-repo state
+.codegraph/
 .crucible/
 crucible/node_modules/
 agent-guards/node_modules/

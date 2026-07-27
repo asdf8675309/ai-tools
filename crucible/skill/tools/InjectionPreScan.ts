@@ -134,8 +134,25 @@ const INSTRUCTION_PATTERNS: PatternDef[] = [
   { regex: /\brespond\s+only\s+with\b.{0,80}\b(approve|no\s+findings|clean|pass)\b/i, description: "Output manipulation" },
   { regex: /\b(repeat|print|show|reveal)\s+(your\s+)?(full\s+)?(system\s+)?(instructions|prompt|system\s+prompt)\b/i, description: "System-prompt extraction" },
   { regex: /\bpre-?approved\b.{0,80}\b(skip|merge|approve|review)\b/i, description: "Authority confusion" },
-  { regex: /\b(skip|bypass)\s+(the\s+)?(security|ci|test|review|checks?)\b/i, description: "Polite redirection" },
-  { regex: /\bdo\s+not\s+flag\b/i, description: "Do-not-flag instruction" },
+  // DELIBERATELY ABSENT: bare `skip|bypass the (security|ci|test|review)` and a
+  // bare `do not flag`. Both were here and both had to go.
+  //
+  // Measured on this repo's own tree: they produced 42 of ~120 total CRITICAL
+  // hits across 135 clean files — including reviewer checklists whose whole job
+  // is saying "do not flag these", and `references/DoNotReport.md`, a document
+  // that is a list of things not to flag. Every injection candidate is exempt
+  // from the disprove pass by design (a deterministic match is not a claim for a
+  // model to argue with), so a false positive here reaches the report at
+  // CRITICAL, unfilterable, and forces BLOCK. That is the most expensive kind of
+  // false positive this system can produce.
+  //
+  // The deeper reason they cannot be tuned: "do not flag X" is exactly how an
+  // author legitimately documents a suppression. No regex separates that from an
+  // attacker writing the same words — only the CHANNEL does. So the constrained
+  // forms above carry this load instead: addressed to a named reviewer (:131,
+  // :132), inside an HTML comment (:128, :140), carrying an authority claim
+  // (:136), or wrapped in test framing (:139). All of those survive; the bare
+  // prose forms do not, and no corpus fixture depended on them.
   { regex: /\bthis\s+is\s+a\s+test\b.{0,80}\bdo\s+not\s+flag\b/i, description: "Test framing do-not-flag instruction" },
   { regex: /<!--[\s\S]{0,240}\b(approve|skip|ignore|do\s+not\s+flag|no\s+findings)\b[\s\S]{0,240}-->/i, description: "Hidden markdown instruction" },
 ];
@@ -307,26 +324,20 @@ function addIdentifierHits(lines: ScanLine[], file: string, out: MutableCandidat
 }
 
 function addBlockHits(lines: ScanLine[], file: string, out: MutableCandidate[]): void {
-  let commentRun: ScanLine[] = [];
   let contentBlock: ScanLine[] = [];
   let inBlockComment = false;
 
-  const flushCommentRun = (): void => {
-    const first = commentRun[0];
-    if (first && commentRun.length >= 8) {
-      const blockText = commentRun.map((line) => line.text).join("\n");
-      if (distinctPolicyKeywords(blockText).length < 2) {
-        out.push({
-          severity: "MEDIUM",
-          file,
-          line: first.line,
-          evidence: blockText,
-          subtype: "comment-density",
-        });
-      }
-    }
-    commentRun = [];
-  };
+  // GONE: a comment-run tracker that emitted MEDIUM for any run of >=8 comment
+  // lines carrying FEWER than two policy keywords. Read that condition twice —
+  // it fired on long comment blocks with nothing suspicious in them, which is
+  // the definition of a well-documented file. Measured on this repo: 57 of 135
+  // clean files, not one an attack. A file header is not an injection, and
+  // length is not evidence.
+  //
+  // The signal it reached for is already covered, and covered better:
+  // INSTRUCTION_PATTERNS matches directives wherever they sit, and
+  // flushContentBlock below catches the keyword clustering that refusal-bait
+  // actually uses. No corpus fixture was detected by that rule alone.
 
   const flushContentBlock = (): void => {
     const first = contentBlock[0];
@@ -351,15 +362,12 @@ function addBlockHits(lines: ScanLine[], file: string, out: MutableCandidate[]):
     const comment = isCommentLine(line.text, before);
     const stringLike = isStringLikeLine(line.text);
     if (line.text.includes("/*")) inBlockComment = true;
-    if (comment) commentRun.push(line);
-    else flushCommentRun();
 
     if (comment || stringLike) contentBlock.push(line);
     else flushContentBlock();
 
     if (line.text.includes("*/")) inBlockComment = false;
   }
-  flushCommentRun();
   flushContentBlock();
 }
 

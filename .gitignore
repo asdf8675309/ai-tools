@@ -23,6 +23,10 @@ temp/
 *.crt
 *.cer
 
+# Your own banned-string list for sprint's leak sweep. Never commit this —
+# a checked-in list of the strings you are hiding is itself the leak.
+.leak-terms.json
+
 # Local index / per-repo state
 .codegraph/
 .crucible/

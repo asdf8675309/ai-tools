@@ -1,0 +1,18 @@
+[
+  {
+    "label": "organisation names",
+    "terms": ["acme", "acme-corp", "acmeinternal"]
+  },
+  {
+    "label": "internal CI check names",
+    "terms": ["Nightly Widget Scan", "Release Gate Judge"]
+  },
+  {
+    "label": "internal ticket references",
+    "terms": ["ACME-", "INTERNAL-"]
+  },
+  {
+    "label": "private config paths",
+    "terms": ["/opt/acme-config", ".acme/state"]
+  }
+]

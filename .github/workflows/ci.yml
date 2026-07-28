@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-guards, crucible, crucible/ci]
+        package: [agent-guards, crucible, crucible/ci, sprint]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-guards, crucible, crucible/ci]
+        package: [agent-guards, crucible, crucible/ci, sprint]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

@@ -32,7 +32,7 @@
  */
 
 import { readFileSync } from "fs";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { join } from "path";
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -263,7 +263,9 @@ export async function generatePacket(opts: {
   const sinceRef = opts.sinceRef ?? "origin/main";
   const cwd = opts.cwd ?? process.cwd();
 
-  const changedFiles = execSync(`git diff --name-only ${sinceRef}...HEAD`, {
+  // --end-of-options (git ≥2.24) so a `-`-prefixed ref can never be parsed as a
+  // flag. A bare `--` only separates pathspecs, not revisions.
+  const changedFiles = execFileSync("git", ["diff", "--name-only", "--end-of-options", `${sinceRef}...HEAD`], {
     cwd, encoding: "utf8",
   })
     .split("\n")
@@ -292,7 +294,7 @@ export async function generatePacket(opts: {
     });
   }
 
-  const fullDiff = execSync(`git diff ${sinceRef}...HEAD`, { cwd, encoding: "utf8" });
+  const fullDiff = execFileSync("git", ["diff", "--end-of-options", `${sinceRef}...HEAD`], { cwd, encoding: "utf8" });
   const { text: redactedDiff } = redactSecrets(fullDiff);
   const diff_chunks = chunkDiff(redactedDiff);
 

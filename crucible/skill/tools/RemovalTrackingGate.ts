@@ -26,7 +26,7 @@
  *   bun tools/RemovalTrackingGate.ts --since origin/main --pr 145
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { loadConfig } from "./Config.ts";
 import type { AgentAuthor } from "./PRAuthorClassifier.ts";
 
@@ -68,7 +68,10 @@ export function computeRemovalRatio(opts: {
   const since = opts.sinceRef ?? "origin/main";
   const cwd = opts.cwd ?? process.cwd();
 
-  const numstat = execSync(`git diff --numstat ${since}...HEAD`, {
+  // --end-of-options (git ≥2.24) so a `-`-prefixed ref can never be parsed as a
+  // flag. A bare `--` only separates pathspecs, not revisions. The array form
+  // above stops a shell from seeing the ref; this stops git from doing so.
+  const numstat = execFileSync("git", ["diff", "--numstat", "--end-of-options", `${since}...HEAD`], {
     cwd, encoding: "utf8",
   }).trim();
 
@@ -86,7 +89,7 @@ export function computeRemovalRatio(opts: {
     files_changed++;
   }
 
-  const fullDiff = execSync(`git diff ${since}...HEAD`, { cwd, encoding: "utf8" });
+  const fullDiff = execFileSync("git", ["diff", "--end-of-options", `${since}...HEAD`], { cwd, encoding: "utf8" });
   const added_multiline_strings = countMultilineStringsInHunk(fullDiff, "+");
   const removed_multiline_strings = countMultilineStringsInHunk(fullDiff, "-");
 

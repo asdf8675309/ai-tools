@@ -39,7 +39,7 @@
  *   echo '{"branchName":"codex/foo"}' | bun tools/PRAuthorClassifier.ts
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -168,8 +168,15 @@ export function classifyPRAuthor(input: ClassificationInput): ClassificationResu
  * authenticated against the repo.
  */
 export function classifyFromPR(prNumber: number, cwd = process.cwd()): ClassificationResult {
-  const json = execSync(
-    `gh pr view ${prNumber} --json author,headRefName,body,commits`,
+  // `gh` has no --end-of-options equivalent, so the argument itself has to be
+  // proven safe. The `number` type is compile-time only — a caller reading a PR
+  // number from argv or JSON can still hand us `-`-prefixed text at runtime.
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    throw new Error(`classifyFromPR: prNumber must be a positive integer, got ${JSON.stringify(prNumber)}`);
+  }
+  const json = execFileSync(
+    "gh",
+    ["pr", "view", String(prNumber), "--json", "author,headRefName,body,commits"],
     { cwd, encoding: "utf8" },
   );
   const data = JSON.parse(json) as {

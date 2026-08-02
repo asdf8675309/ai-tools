@@ -20,15 +20,16 @@
 #
 #   role                 config.yaml (shipped)   this file
 #   ───────────────────  ──────────────────────  ─────────────────────────────
-#   code quality         sonnet                  sonnet          (nothing beat it)
+#   code quality         sonnet                  a gateway model (1.10 combined, thin clean n)
 #   security             sonnet                  a second vendor (highest-stakes lens)
 #   simplify             sonnet                  gemini-class    (0% vs 8% spurious)
-#   typescript           sonnet                  gemini-class    (0% vs 31% spurious)
-#   platform             sonnet                  sonnet
+#   typescript           sonnet                  gemini-class    (10% vs 31% spurious)
+#   platform             sonnet                  a gateway model (0.95, cheaper AND faster)
 #   test runner          sonnet                  external CLI    (0% over 10 samples)
 #   clone detector       sonnet (heuristic)      local embeddings (true Type-4)
-#   ci tamper            haiku                   haiku           (pattern-match; smallest wins)
-#   history / continuity sonnet                  sonnet
+#   ci tamper            haiku                   haiku           (pattern-match, smallest wins)
+#   history analyzer     sonnet                  a gateway model (1.01 combined)
+#   pr continuity        sonnet                  sonnet          (zero clean controls, untested)
 #   ───────────────────  ──────────────────────  ─────────────────────────────
 #   disprove (primary)   haiku                   haiku
 #   disprove (2nd vote)  none                    gemini-class    (gates CRITICAL/HIGH)
@@ -48,51 +49,119 @@
 # Start on the left. Move right when the false positives you are still seeing
 # look like the kind one model family would share.
 #
-# READ THE EVAL CAVEATS FIRST — CREDITS.md § Model selection. The assignments
-# below come from a small precision pilot (n=5–10 diffs per model/role), judged
-# by a model, measuring spurious findings on clean code only. It says nothing
-# about what each model MISSED. Model versions move. Treat every line here as
-# "what one person measured once," not as a recommendation, and re-run your own
-# evaluation before trusting any of it.
+# READ THE EVAL CAVEATS FIRST. Two rounds of measurement produced the
+# assignments below, and both are documented with their limits:
+#
+#   - CREDITS.md § Model selection — a May 2026 precision-only pilot, n=5–10
+#     diffs per model/role, judged by a model. It measures spurious findings on
+#     clean code and says nothing about what each model MISSED.
+#   - MODEL-SELECTION.md — a July 2026 run that measures both halves: recall
+#     against 147 tasks mined from real review history, plus spurious rate
+#     against 38 clean-code controls. Read §3 before you trust any single
+#     number in this file. Every early standout in that run reversed as
+#     clean-task samples accumulated.
+#
+# Model versions move, prices move faster, and one lens here still has zero
+# clean controls behind it. Treat every line below as "what one person measured
+# once," not as a recommendation, and re-run the evaluation against your own
+# review history before adopting any of it. MODEL-SELECTION.md §10 is the
+# procedure for doing that.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reviewer assignment — deliberately mixed
 # ─────────────────────────────────────────────────────────────────────────────
+# EVERY `gateway-*` LINE BELOW IS OPT-IN AND NEEDS `integrations.gateway`.
+# Copy one slot at a time, not the block. The shipped `config.yaml` runs all ten
+# lenses on Claude alone with no account and no key, and that path stays
+# supported — nothing here is a new default.
+#
+# Each comment carries the measured basis and the n behind it, split into recall
+# trials and clean-control trials because those are two different sample sizes
+# and the second one is the one that decides whether a precision figure means
+# anything. A lens with no numbers has no lens-isolated data. Those slots stay
+# on the incumbent and say so.
+#
+# ABOUT THE FALLBACK ORDERS. A failed `gateway-*` slot falls to the one flat
+# `reviewer_fallback_chain` below, so the per-lens orders quoted in the comments
+# are not something a gateway slot can express here. They are what the gateway
+# route should hold if you use one (ci/GATEWAY-ROUTING.md, Option B). Without a
+# route, the flat chain applies to every lens alike — a safe outcome and a less
+# precise one. One exception does live in this file: an `external_cli_map` entry
+# takes a per-entry `fallback:`, tried ahead of the flat chain. There is no
+# equivalent field for a gateway entry. The design rule for any order you build:
+# every entry is a different vendor, because a fallback exists for an outage and
+# three models from one vendor fail together.
 models:
-  # Sonnet held the incumbent slot on precision here; nothing beat it.
-  reviewer_code_quality:      claude-sonnet
+  # 1.10 combined (recall n=8 / clean n=2), against the Sonnet incumbent's 1.03
+  # on the broad set. Precision 1.00 — measured on TWO clean tasks, which is
+  # exactly the thin-sample shape that reversed four other models in this run.
+  # Its recall is LOWER than Sonnet's (0.10 vs 0.23). Take this one last.
+  # Order: luna-pro → ring → glm (three vendors).
+  reviewer_code_quality:      gateway-luna-pro
 
   # A different vendor on the highest-stakes lens, on purpose. Security is
   # where a shared blind spot costs the most, so it is the first place worth
   # spending vendor diversity.
+  #
+  # NOT AN EVAL RESULT. This lens was never tested in isolation, so the
+  # measurement says nothing about it and did not move it. The second vendor
+  # here is an architecture choice that predates the evaluation, not a score.
+  # Do not move a security reviewer on general-purpose data.
+  # Order: gpt → deepseek-pro → sonnet.
   reviewer_security:          gateway-gpt
 
   # Swapped on measured precision: 0% spurious against Sonnet's 8%, and it
-  # found MORE legitimate issues, not fewer.
+  # found MORE legitimate issues, not fewer. Prior round only — not re-tested
+  # in the later two-metric run, so the recall half is still unmeasured here.
+  # Order: gemini → luna → sonnet.
   reviewer_simplify:          gateway-gemini-flash
 
   # The most counterintuitive result in the pilot and the reason per-role
   # assignment exists at all. The incumbent was the WORST model tested on this
-  # role — 31% spurious, flagging type problems in clean TypeScript — while a
-  # much cheaper model scored 0% and found more real issues.
+  # role — 31% spurious, flagging type problems in clean TypeScript — while this
+  # much cheaper model scored 10% and found three times as many legitimate
+  # issues. Prior round only. Note the exact model string: a sibling variant
+  # one dot apart in its version scored 0% here, and an earlier version of
+  # MODEL-SELECTION.md credited that 0% to this model by mistake.
+  # Order: gemini → luna → sonnet.
   reviewer_typescript:        gateway-gemini-flash
 
-  reviewer_platform:          claude-sonnet
+  # The best-evidenced swap in the set: 0.95 combined (recall n=11 / clean n=9)
+  # against the Sonnet incumbent's 0.67, and it wins on all three axes at once —
+  # quality, an order of magnitude less per trial, and a lower median latency.
+  # Best-sampled lens in the run, which is why it is the one to try first.
+  # Order: deepseek-pro → luna-pro → ring.
+  reviewer_platform:          gateway-deepseek-pro
 
   # Runs the suite and reads failures. An external reasoning CLI scored 0%
   # spurious across 10 samples with 40 legitimate findings — the strongest
-  # single result in the pilot.
+  # single result in the pilot. DELIBERATELY NOT ROUTED THROUGH THE GATEWAY: it
+  # runs on a flat-rate CLI subscription, so a gateway route moves it onto
+  # metered billing and buys nothing the measurement can see.
   reviewer_test_runner:       cli-alt-vendor
 
   # Real Type-4 clone detection needs embeddings. Local: free, private, and
-  # nothing about your codebase leaves the machine.
+  # nothing about your codebase leaves the machine. No model selection to make —
+  # this slot is not an LLM.
   reviewer_clone_detector:    local-embed
 
-  # Pure YAML pattern-matching. The smallest model is correct here; a larger
-  # one is spend with no gain.
+  # Pure YAML pattern-matching. The smallest model is correct here, and a larger
+  # one is spend with no gain. Untested in isolation, so the incumbent holds.
+  # Order: haiku → a small fast gateway model → luna.
   reviewer_ci_tamper:         claude-haiku
 
-  reviewer_history_analyzer:  claude-sonnet
+  # 1.01 combined (recall n=9 / clean n=5) against luna 0.89 and the Sonnet
+  # incumbent's 0.66. Second reason for this one: it keeps `luna` out of a
+  # primary slot. `luna` and `luna-pro` correlate at r=0.97, and two lenses
+  # running one opinion is the exact failure the two-pass architecture exists
+  # to prevent. Order: deepseek-pro → luna → sonnet.
+  reviewer_history_analyzer:  gateway-deepseek-pro
+
+  # STAYS ON THE INCUMBENT, and the reason is the useful part. The newest lens
+  # has almost no review history to mine: 2 recall tasks and ZERO clean
+  # controls. A model topped that table. Reporting it would be reporting noise,
+  # because the precision column is empty by construction. This is an absence
+  # of evidence, not a weak result. Order: sonnet → luna → glm.
   reviewer_pr_continuity:     claude-sonnet
 
   # Pass 2. The primary verdict stays on a small fast model — the disprove task
@@ -109,6 +178,11 @@ models:
 # The final rung must stay claude-* — it dispatches as a local subagent with no
 # external dependency, so a reviewer slot can never go empty. Order matters:
 # vendor-diverse first (survives one vendor's outage), gateway-free last.
+#
+# Before you pair any two models across slots, correlate their per-task scores.
+# Two models above r≈0.95 are one opinion bought twice, and the pair that looked
+# most attractive in this run — the two top scorers overall — turned out to be
+# the most correlated pair on the board at r=0.97.
 reviewer_fallback_chain:
   - gateway-gemini-flash
   - claude-sonnet
@@ -123,9 +197,17 @@ claude_model_map:
 
 # Model strings are whatever your endpoint expects. These are the shapes a
 # gateway fronting multiple vendors typically uses — check yours.
+#
+# A slug names the MODEL. It does not name who serves it. In this run one
+# requested slug came back from twelve different serving companies, and every
+# call for another was served by a single cloud provider that was not that
+# model's own vendor. If you have a data-handling policy, read the response
+# envelope's provider field — see ci/GATEWAY-ROUTING.md.
 gateway_model_map:
   gateway-gemini-flash: google-ai-studio/gemini-3-flash-preview
   gateway-gpt:          openai/gpt-5.5
+  gateway-luna-pro:     openai/gpt-5.6-luna-pro
+  gateway-deepseek-pro: deepseek/deepseek-v4-pro
   gateway-embedding:    openai/text-embedding-3-small
 
 local_model_map:

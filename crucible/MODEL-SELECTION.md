@@ -259,8 +259,15 @@ Two decisions came directly out of this:
 **Never put two r=0.97 models in different slots.** `luna` and `luna-pro` were the top two
 scorers overall, and the obvious move was to put one in each of the two best-matching lenses.
 At r=0.97 you would be paying for two lenses and getting one opinion — precisely the failure
-the architecture exists to prevent. The final assignment demotes `luna` to a fallback position
-specifically so this pairing cannot occur.
+the architecture exists to prevent. The recommendation that follows keeps `luna` out of any
+primary slot for exactly this reason — it belongs in a fallback position behind a
+low-correlation model, not beside its own twin.
+
+To be precise about what this repository does and does not do: that demotion is advice for the
+route you build, not a wiring this config performs. `skill/config.example.yaml` defines a key for
+`luna-pro` and none for plain `luna`, and per-lens fallback orders are not something a gateway
+slot can express there — they live in your gateway route. The config can tell you which model
+leads a lens. It cannot tell you what stands behind it.
 
 **Low precision is not automatically disqualifying — it depends on your architecture.**
 `poolside/laguna-xs-2.1` had the worst precision on the focused set and appears in 5 of the 6
@@ -338,18 +345,43 @@ Numbers below are from the focused set — 19 tasks over four lenses, 302 trials
 where noted. **Read the evidence column before the model column.** Three slots have no
 lens-isolated data at all and are listed only so you know they were not tested.
 
+**The n column counts trials per model, not distinct tasks.** Each task ran two to three times
+per model, so `platform`'s "11 / 9" is 11 recall trials over 4 distinct recall tasks and 9 clean
+trials over 3 distinct clean tasks. The Appendix's corpus-depth table counts the distinct tasks,
+which is why its numbers are smaller. Both matter, and they answer different questions: trials
+tell you how stable a score is, distinct tasks tell you how much of the lens you actually
+covered. Four tasks is thin however many times you run them.
+
 | Lens | Recommended | Combined | n (recall / clean) | $/trial | Evidence quality |
 |---|---|---|---|---|---|
 | `code_quality` | `openai/gpt-5.6-luna-pro` | **1.10** | 8 / 2 | $0.0072 | **Strong on precision, thin on clean n.** 1.00 precision — but on 2 clean tasks. Recall 0.10 vs Sonnet's 0.23. |
 | `platform` | `deepseek/deepseek-v4-pro` | **0.95** | 11 / 9 | $0.0154 | **Strong.** Beats the Sonnet incumbent (0.67) on all three axes — quality, cost (an order of magnitude, per the $/trial column), and median latency. Best-sampled lens in the set. |
 | `history_analyzer` | `deepseek/deepseek-v4-pro` | **1.01** | 9 / 5 | $0.0154 | **Good.** vs `luna` 0.89, Sonnet 0.66. |
 | `simplify` | `google-ai-studio/gemini-3-flash-preview` | — | — | — | **Prior round only.** 0% spurious vs Sonnet 8% in the earlier precision-only testing. Not re-tested here. |
-| `typescript` | `google-ai-studio/gemini-3-flash-preview` | — | — | — | **Prior round only.** 0% spurious vs Sonnet 31%. Not re-tested here. |
+| `typescript` | `google-ai-studio/gemini-3-flash-preview` | — | — | — | **Prior round only.** 10% spurious vs Sonnet 31%, and it found three times as many legitimate issues. Not re-tested here. A *different* gemini variant scored 0% on this lens — see the correction note below. |
 | `test_runner` | external CLI, flat-rate | — | — | — | **Prior round only.** 0% spurious vs Sonnet 12%. Runs on a flat-rate coding CLI; routing it to a metered gateway costs money for no measured gain. |
 | `security` | *unchanged incumbent* | — | — | — | ⚠️ **Never lens-isolated. Not a recommendation.** Highest-stakes lens; do not move it on general-purpose data. |
 | `ci_tamper` | *unchanged incumbent* (smallest model) | — | — | — | ⚠️ **Untested on this lens.** Pure YAML pattern-matching; the smallest model holds. |
 | `pr_continuity` | *unchanged incumbent* | — | — | — | ⚠️ **2 tasks, ZERO clean controls. Not a verdict.** See below. |
 | `clone_detector` | *n/a* | — | — | — | Local embedding model, not an LLM. No selection to make. |
+
+### Correction — the typescript row named the wrong gemini variant
+
+The first version of this document credited `gemini-3-flash-preview` with **0% spurious** on the
+typescript lens. That figure belongs to `gemini-3.5-flash`, a different model. The variant
+actually wired into the config scored **10%**. Both beat the Sonnet incumbent's 31%, so the
+recommendation does not change — but the number was wrong, and it was wrong in the direction
+that flatters the recommendation, which is the direction to be most suspicious of.
+
+The source table is right there in [CREDITS.md](./CREDITS.md#model-selection) with both variants
+on adjacent rows. Two models one dot apart in a version string, tested on the same lens in the
+same round, and the write-up merged them. The neighbouring `simplify` row is where the confusion
+probably started: there `gemini-3-flash-preview` genuinely did score 0%.
+
+Worth stating what this cost and what it didn't. It changes no assignment. It does mean that
+anyone who read the earlier version and reasoned "the typescript reviewer is a 0%-spurious
+model" was reasoning from a number that never existed. **Cite the model string exactly, including
+the parts that look like noise** — a variant suffix is not a formatting detail.
 
 ### `pr_continuity` is what an untested slot looks like
 

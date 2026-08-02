@@ -641,6 +641,55 @@ Each time, a smaller lineup found a real hole in a more elaborate one. Designing
 
 ---
 
+## 14. Measuring which model belongs in which slot
+
+Assigning a model per reviewer lens is only defensible if you measured it. I ran that measurement — 818 trials over two days — and the method turned out to matter far more than the rankings. [MODEL-SELECTION.md](./MODEL-SELECTION.md) is the full write-up with the numbers and the models named. What follows is the part that generalizes past this tool.
+
+### One metric picks the wrong model, in both directions
+
+The obvious evaluation asks "did the model find the known defects?" That is a recall-only evaluation, and **it rewards the model that flags everything.** For a merge gate, that model is the worst possible reviewer — it is the cry-wolf failure the entire two-pass architecture exists to fight. An evaluation built that way tells you to install the disease.
+
+Inverting it fails the same way. A precision-only evaluation asks "did the model stay quiet on clean code?" and the model that never says anything wins.
+
+That is not a thought experiment. One model in this run scored mid-pack on precision — better than the incumbent — at a **one-second median latency** and near the bottom of the cost table. On a precision-only board it looks like a find. Its recall was **0.00**. Not low. Zero. Across 18 recall trials it never once identified a defect the historical reviewer had flagged.
+
+So: two task sets. **Recall tasks** are diffs a reviewer actually reviewed, scored on whether the model finds what that reviewer found. **Clean controls** are diffs a reviewer examined and cleared, scored on whether the model stays quiet. Both, or you are measuring half the job.
+
+The result that reframed the problem: recall spanned 0.20 to 0.33 across the field, a 13-point band whose internal ordering was not even stable. Precision spanned 0.61 to 0.85 on the same cut, and 0.45 to 0.85 on a focused per-lens set. Roughly three times the spread, on the axis nobody measures.
+
+**On a fixed diff, most competent models find broadly similar defects. They differ enormously in how much they invent.** That single fact reframes the whole selection problem, and it is completely invisible to any evaluation that only checks whether the known bugs were found.
+
+### Precision estimates need clean-task volume specifically, not total trials
+
+Four models led the board at some point during this run. All four moved, and two collapsed outright — one went from best-on-the-board to worst-on-the-board on the same task set.
+
+Every reversal traces to one mechanism, and it is a mechanism you will hit. Recall tasks outnumber clean controls in any corpus mined from real history, because reviews that found something are simply more common than reviews that found nothing. If your runner works the task list in order, each model's *total* n climbs fast while its *clean* n sits at one or two. The combined score then looks well-sampled while its precision half is measuring noise.
+
+The worst call in the run reported a model as mid-pack on a precision of 0.45 at n=13. It had almost no clean-task samples behind it. At n=55 the same model's precision was 0.78, and it took the primary slot on two lenses. **A precision number computed over two clean tasks is not a weak estimate. It is not an estimate.**
+
+Four practices, in order of how much they save you:
+
+- **Report n per metric, never one n.** `n=55` is meaningless. `recall n=38, clean n=17` is actionable. Any table with a single n column is hiding this.
+- **Interleave clean controls into the task order** rather than appending them, so precision accumulates alongside recall instead of arriving last.
+- **Set a floor before you rank.** Nothing here was trustworthy under roughly 10 clean trials per model. Below that, report the recall half and say the precision half is absent.
+- **Expect early leaders to fall.** Both models that led early were flagged as low-n at the time and both collapsed anyway. Knowing the caveat does not protect you unless you act on it.
+
+### Sabotage-test the graders, or the scoreboard is decoration
+
+This document's organizing idea applies to evaluation harnesses without modification: a grader that cannot fail is not a grader.
+
+My first recall grader pinned the alphabetically-first file the historical reviewer had flagged. **21 of 39 graders rejected correct answers** — a model that named a different, equally correct file from the same finding set scored wrong. The scoreboard was measuring alphabetical luck and looked exactly like a scoreboard measuring review quality.
+
+Feed each grader a known-correct answer and a known-junk answer before you trust a single score. It must accept the first and reject the second.
+
+### Do not score infrastructure errors as zeros
+
+A provider returning an empty completion is not a bad answer, and averaging it in as one is a measurement error wearing a data point's clothes. One model looked unreliable and mediocre here until its errored trials were re-run — the errors were endpoint flakiness on a model launched that morning, and after the sweep it had zero errors and led on recall.
+
+Delete errored results and redo them. Then say how many you deleted, because a run that silently drops trials is its own kind of unfalsifiable.
+
+---
+
 ## A short list, if you only take a few
 
 1. Make every check prove it can fail. Break the thing on purpose; confirm the check notices — and when the code is already failing, only detection of your *specific* injected input is evidence. A red exit code carries no information.
@@ -654,6 +703,7 @@ Each time, a smaller lineup found a real hole in a more elaborate one. Designing
 9. Say out loud what you could not measure. A calibration that names its dead signals and its survivorship bias is worth more than one that doesn't.
 10. An agent that cannot find the code will tell you the code is fine. Treat "file does not exist" from a verifier as a bug in your plumbing, never as a clean bill of health.
 11. Never gate on free text a model wrote. It will phrase it differently, your regex will miss, and a real review will be recorded as no review at all.
+12. Measure a reviewer model on clean code as well as broken code. Recall-only picks the model that flags everything, and precision estimates need clean-task volume specifically — not total trials.
 
 ---
 

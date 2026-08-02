@@ -77,9 +77,49 @@ Open two PRs — one trivial, one large — and check the gateway's request log 
 
 This is the same class of problem the rest of this repository is about: a check that appears to pass while testing nothing.
 
+Two failure modes are specific to named routes, and both were found the expensive way.
+
+**Read the model the response says answered, not the one you asked for.** Once you put a route name in the model field, that string stops describing anything real. It names the route. The model that served the call is a separate field in the response envelope, and only that field is evidence. In this pipeline a route silently served its third-choice model for three consecutive calls — the requests looked correct, the reviews came back, and the only thing that showed the difference was the served-model field. Log both. The pair also tells you *which* thing changed later: same served model with a different provider means the infrastructure moved, a different served model means the route fell through.
+
+**A nonexistent route fails quietly.** A typo in a route name does not produce a loud error. You get an unsuccessful call, the reviewer falls back, and the review still completes — so a single mistyped character disables one lens for as long as nobody looks. Verify each route the moment you create it, before wiring anything to it. One request with a fixed expected answer is enough:
+
+```bash
+curl -sS "$REVIEW_API_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $REVIEW_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"dynamic/<route-name>",
+       "messages":[{"role":"user","content":"Reply with exactly: ROUTE_OK"}]}'
+```
+
+Check two things in the response: that the text is `ROUTE_OK`, and that the served model is the one the route was supposed to reach. Wire one slot, verify it, then wire the next.
+
+### The slug does not name the infrastructure
+
+When you request a model through an aggregating gateway, the slug names the model and says nothing about who serves it. Measured across one 818-trial run: a single requested slug was served by **twelve different companies**, and every one of 65 calls for a different vendor's model was served by a large cloud provider that was not that vendor.
+
+If you have any data-handling policy, this is a policy question rather than a trivia field. One vendor's data policy does not govern another company's serving infrastructure. Log the provider the response reports — deriving it from the slug you sent produces a confident wrong answer, which is worse than having no field at all.
+
+[MODEL-SELECTION.md §7](../MODEL-SELECTION.md) has the full provider spread.
+
+### Reasoning tokens are billed and do not appear in the answer
+
+A model can spend tokens you never see. A one-word route-verification probe in this pipeline — the `ROUTE_OK` call above — billed 17 output tokens, **10 of them reasoning tokens** absent from the completion text. On a short probe that is loose change. Across a fleet of ten reviewers on every pull request it is not, and budgeting from the visible output undercounts by whatever the model chose to think.
+
+Record the reasoning-token count alongside the visible usage if your provider reports it. If it does not, treat any cost projection built from response lengths as a floor.
+
+### Latency is a gate requirement, not a nicety
+
+Reviewers run in parallel, so a review takes as long as its slowest lens. That makes tail latency a hard constraint on which models are usable at all, independent of quality.
+
+**Rank candidate models on p90, not median.** A "flash" and a "pro" variant of one vendor's model had medians of 127s and 54s — a bad gap but a survivable one. Their p90s were **604s and 130s**. One of them stalls for minutes on roughly one call in ten, which across ten parallel lenses lands on most reviews, and the median understates that by more than half. The variant with the faster-sounding name was the slow one. Across the whole run, p90 ranged from 3 seconds to 604 seconds.
+
+A useful diagnostic while you are at it: a transient problem shows up as a shifted median, and a structural one shows up as a persistent tail. Retest before excluding a model, then look at the tail rather than the middle.
+
 ## Notes and limits
 
 - **Route creation is a dashboard action** in the version of the docs this was written against. A JSON-based configuration path is referenced but I have not verified it, so treat any automation of route creation as unconfirmed and check the current docs.
 - **Keep a route definition in version control** if you use one — a dashboard-only config has no history and no review. A JSON file describing the intended rule chain, kept next to the workflow and updated when the route changes, is enough. Treat it as documentation rather than something that deploys.
 - **Model names and provider prefixes change.** Pin what you verify, and re-check when a review starts failing for no apparent reason.
+- **A budget or degraded-mode override that re-points a slot outside the routing layer throws away the model choices you measured.** This is worth stating because it is a natural thing to build and it quietly undoes the work. If a cost-pressure rule swaps a reviewer onto some cheaper path that bypasses the gateway, that lens is no longer running the model your evaluation chose, and the band you happened to be in becomes an input to which model judged your code. Two ways out. Either express the cheap option as another route and keep every path inside the same layer, or leave the override off. This repository ships no such mechanism, deliberately — there is nothing here to configure, and adding one is a decision rather than a default.
+- **Which model belongs behind each route is a separate question, and it has an answer you have to measure yourself.** [MODEL-SELECTION.md](../MODEL-SELECTION.md) covers how to run that measurement against your own review history, and why a recall-only evaluation picks the wrong model.
 - **A gateway is a dependency.** It is now in the path of every review. Decide deliberately whether that is a trade you want; Option A has no such dependency.

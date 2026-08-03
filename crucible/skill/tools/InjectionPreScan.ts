@@ -436,7 +436,9 @@ export function scanDiff(diff: string): PrescanCandidate[] {
 }
 
 function readDiffFromGit(since: string): string {
-  const res = spawnSync("git", ["diff", `${since}...HEAD`], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
+  // `--end-of-options` so a `since` beginning with a dash is a bad revision
+  // rather than a git option — `--output=<path>` there would write a file.
+  const res = spawnSync("git", ["diff", "--end-of-options", `${since}...HEAD`], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
   if (res.error) throw res.error;
   if (res.status !== 0) throw new Error((res.stderr || `git diff exited ${res.status}`).trim());
   return res.stdout;

@@ -346,6 +346,79 @@ export function mergeLightPath(
   };
 }
 
+// ── Project-overlay hardening ───────────────────────────────────────────────
+// `.crucible.yaml` lives in the working tree of the repository under review, so
+// it is the same untrusted input the diff is (references/TrustBoundary.md). The
+// light path already refuses to be widened by it (hardenLightPathForGate) and
+// risk tiers already union rather than replace; these are the remaining fields
+// where an overlay would not tune a review but redirect it — a command to run, an
+// endpoint to reach, or the NAME of an env var whose value is then handed over.
+//
+// Policy: an overlay may narrow, never widen. It may turn an integration off; it
+// may not turn one on, and it may not name a target.
+
+/** Dotted paths a project overlay may never set. */
+export const OVERLAY_PROTECTED_PATHS: readonly string[] = [
+  // A map entry is a command line (`external_cli_map`) or an endpoint
+  // (`local_model_map`) that a reviewer role can then be pointed at.
+  "external_cli_map",
+  "local_model_map",
+  "integrations.gateway.base_url",
+  "integrations.gateway.api_key_env",
+  "integrations.verdict_log.path",
+  "integrations.metis.compose_dir",
+  "integrations.metis.scan_image",
+  "integrations.metis.network",
+  "integrations.metis.llm.base_url_env",
+  "integrations.metis.llm.api_key_env",
+];
+
+function deleteAtPath(root: Record<string, unknown>, path: string): boolean {
+  const parts = path.split(".");
+  const leaf = parts.pop();
+  if (!leaf) return false;
+  let node: Record<string, unknown> = root;
+  for (const part of parts) {
+    const next = node[part];
+    if (!isPlainObject(next)) return false;
+    node = next;
+  }
+  if (!(leaf in node)) return false;
+  delete node[leaf];
+  return true;
+}
+
+/**
+ * Strip the fields a working-tree overlay is not allowed to set, returning the
+ * surviving overlay and every dropped path so the caller can say so out loud.
+ * Non-object input passes through as an empty overlay — merging it would replace
+ * the whole config. Pure apart from cloning its input.
+ */
+export function hardenProjectOverlay(overlay: unknown): { overlay: unknown; dropped: string[] } {
+  if (!isPlainObject(overlay)) return { overlay: {}, dropped: [] };
+  const clone = structuredClone(overlay) as Record<string, unknown>;
+  const dropped: string[] = [];
+
+  for (const path of OVERLAY_PROTECTED_PATHS) {
+    if (deleteAtPath(clone, path)) dropped.push(path);
+  }
+
+  // `enabled: false` is a narrowing, so it survives; anything else is an attempt
+  // to switch an integration on from inside the reviewed tree.
+  const integrations = clone.integrations;
+  if (isPlainObject(integrations)) {
+    for (const name of INTEGRATION_NAMES) {
+      const entry = integrations[name];
+      if (!isPlainObject(entry) || !("enabled" in entry)) continue;
+      if (entry.enabled === false) continue;
+      delete entry.enabled;
+      dropped.push(`integrations.${name}.enabled`);
+    }
+  }
+
+  return { overlay: clone, dropped };
+}
+
 // ── Loader (cached per cwd) ─────────────────────────────────────────────────
 
 let cached: CrucibleConfig | null = null;
@@ -368,7 +441,15 @@ export function loadConfig(): CrucibleConfig {
   const overlayPath = join(cwd, PROJECT_OVERRIDE_FILENAME);
   if (existsSync(overlayPath)) {
     try {
-      cfg = mergeConfig(cfg, parseYaml(readFileSync(overlayPath, "utf8")));
+      const { overlay, dropped } = hardenProjectOverlay(parseYaml(readFileSync(overlayPath, "utf8")));
+      if (dropped.length > 0) {
+        console.error(
+          `⚠ Crucible: ignored ${dropped.length} protected field(s) in ${overlayPath} — ` +
+            `a working-tree overlay cannot name an execution target, an endpoint, or a credential ` +
+            `env var, nor enable an integration: ${dropped.join(", ")}`,
+        );
+      }
+      cfg = mergeConfig(cfg, overlay);
       resolvedOverlayPath = overlayPath;
     } catch (e) {
       console.error(`⚠ Crucible: ignoring unparseable ${overlayPath} — using skill defaults (${(e as Error).message})`);

@@ -70,7 +70,8 @@ export OPENAI_BASE_URL="https://your-endpoint.example/v1"   # omit for OpenAI di
 
 ### 5. Turn the integration on
 
-In `config.yaml` (or a per-project `.crucible.yaml` overlay):
+In `config.yaml` — the skill's own copy. A per-project `.crucible.yaml` overlay can turn this integration **off**, but not on, and cannot set `scan_image`, `network`, `compose_dir`, or either `llm.*_env` name: that file lives in the tree under review, and those four fields decide which image runs and which environment variable is handed to it. See "Configuration" in `crucible/README.md`.
+
 
 ```yaml
 integrations:

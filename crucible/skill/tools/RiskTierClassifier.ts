@@ -153,7 +153,9 @@ export async function runClassifyRiskCli(argv: string[], cwd: string): Promise<C
   const base = baseIdx >= 0 ? argv[baseIdx + 1] : "origin/main";
   const asJson = argv.includes("--json");
   try {
-    const out = execFileSync("git", ["diff", "--name-only", "--no-renames", `${base}...HEAD`], {
+    // `--end-of-options` so `--base --output=<path>` is a bad revision rather than
+    // a git option that writes a file where the caller asked.
+    const out = execFileSync("git", ["diff", "--name-only", "--no-renames", "--end-of-options", `${base}...HEAD`], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

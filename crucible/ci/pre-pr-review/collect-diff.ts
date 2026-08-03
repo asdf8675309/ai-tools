@@ -29,13 +29,15 @@ const TOTAL_CONTEXT_LIMIT = 300_000; // ~75K tokens — headroom under a 200K ct
 // base branch's commits. The workflow must therefore fetch the base branch
 // WITHOUT --depth=1 — a shallow fetch never brings the merge base and this
 // command dies with "no merge base".
-const diff = execFileSync("git", ["diff", `${BASE_SHA}...HEAD`], {
+// `--end-of-options` so a BASE_SHA that starts with a dash is a bad revision
+// rather than a git option — `--output=<path>` there would write a file.
+const diff = execFileSync("git", ["diff", "--end-of-options", `${BASE_SHA}...HEAD`], {
   encoding: "utf8",
   maxBuffer: 32 * 1024 * 1024,
 });
 const namesRaw = execFileSync(
   "git",
-  ["diff", `${BASE_SHA}...HEAD`, "--name-only"],
+  ["diff", "--name-only", "--end-of-options", `${BASE_SHA}...HEAD`],
   { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
 );
 const names = namesRaw.split("\n").map((s) => s.trim()).filter(Boolean);

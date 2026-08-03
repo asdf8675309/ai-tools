@@ -75,7 +75,9 @@ export function getDiffFiles(cwd: string, base = "origin/main"): DiffStat {
   // --no-renames so a rename lands as delete(old)+add(new) on clean single-path
   // lines: a `git mv code.ts doc.md` then shows `code.ts` (→ full), never the
   // ambiguous `code.ts => doc.md` numstat line whose extname would read `.md`.
-  const out = execFileSync("git", ["diff", "--numstat", "--no-renames", `${base}...HEAD`], {
+  // `--end-of-options` so a `base` beginning with a dash is a bad revision rather
+  // than a git option — `--output=<path>` there would make this write a file.
+  const out = execFileSync("git", ["diff", "--numstat", "--no-renames", "--end-of-options", `${base}...HEAD`], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],

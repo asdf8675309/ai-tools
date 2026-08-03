@@ -13,8 +13,8 @@
  */
 
 import { describe, expect, test, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   announceBypass,
@@ -254,10 +254,17 @@ describe('wrapUntrusted', () => {
 // ── Ephemeral state ───────────────────────────────────────────────────────
 
 describe('stateDir / safeName', () => {
-  test('stateDir nests under the OS temp dir, agent-guards, and the given name', () => {
+  test('stateDir nests under the OS temp dir, a uid-scoped root, and the given name', () => {
     const dir = stateDir('loops');
     expect(dir).toContain('agent-guards');
-    expect(dir.endsWith(join('agent-guards', 'loops'))).toBe(true);
+    expect(dir.endsWith(join(`agent-guards-${process.getuid!()}`, 'loops'))).toBe(true);
+  });
+
+  test('writeState creates its directory 0700 — temp dirs are shared', () => {
+    const file = join(stateDir(`perm-${process.pid}`), 'state.json');
+    writeState(file, { ok: true });
+    expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+    rmSync(dirname(file), { recursive: true, force: true });
   });
 
   test('safeName sanitizes unsafe characters', () => {

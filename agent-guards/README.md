@@ -265,7 +265,7 @@ Use a bypass for real exceptions. Reaching for one every time defeats the purpos
 
 That removes the staged files. **Your `settings.json` still references them** — remove those entries by hand, because this script never edited that file and will not edit it back. Until you do, Claude Code logs a missing-hook error.
 
-Optional cleanup of ephemeral scratch state: `rm -rf "${TMPDIR:-/tmp}/agent-guards"`.
+Optional cleanup of ephemeral scratch state: `rm -rf "${TMPDIR:-/tmp}/agent-guards-$(id -u)"` — the root is uid-scoped and created `0700`, because the temp dir is shared and this state decides whether a guard fires.
 
 ## Fail-open vs. fail-closed
 

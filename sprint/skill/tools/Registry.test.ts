@@ -298,22 +298,29 @@ describe("locking", () => {
     expect(opened).toHaveLength(5);
   });
 
-  test("a lock error that is NOT contention says what it was, instead of a stale-lock timeout", () => {
-    const dir = stateDir();
-    dispatch(dir, "5");
-    // EACCES, not EEXIST. Retrying it 100 times cannot help, and the timeout
-    // message ("remove it if stale") points at a lock file that does not exist.
-    chmodSync(dir, 0o500);
-    try {
-      const r = run(dir, "update", "--sprint-id", "s1", "--issue", "5", "--status", "pr-opened");
-      expect(r.code).toBe(1);
-      const { error } = JSON.parse(r.stderr);
-      expect(error).toContain("cannot acquire");
-      expect(error).not.toContain("timed out");
-    } finally {
-      chmodSync(dir, 0o700);
-    }
-  });
+  // Skipped as root: mode bits do not stop uid 0, so the write SUCCEEDS and
+  // there is no EACCES to assert on. That is the environment CI containers and
+  // devcontainers run in, and a test that fails there for a reason unrelated to
+  // the code under test trains people to ignore the suite.
+  test.skipIf(process.getuid?.() === 0)(
+    "a lock error that is NOT contention says what it was, instead of a stale-lock timeout",
+    () => {
+      const dir = stateDir();
+      dispatch(dir, "5");
+      // EACCES, not EEXIST. Retrying it 100 times cannot help, and the timeout
+      // message ("remove it if stale") points at a lock file that does not exist.
+      chmodSync(dir, 0o500);
+      try {
+        const r = run(dir, "update", "--sprint-id", "s1", "--issue", "5", "--status", "pr-opened");
+        expect(r.code).toBe(1);
+        const { error } = JSON.parse(r.stderr);
+        expect(error).toContain("cannot acquire");
+        expect(error).not.toContain("timed out");
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
 
   test("a rejected argument leaves no stale lock behind", () => {
     const dir = stateDir();

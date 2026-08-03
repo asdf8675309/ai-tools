@@ -76,6 +76,8 @@ Each of these is a specific incident, not a hypothetical.
 
 **A failed query is not a state.** The same rule as the empty poll, one layer down: an expired token, a rate limit or a dropped connection makes `gh pr view` fail, and folding that into `UNKNOWN` (or a review count of zero) turns the next successful poll into a spurious transition — `READY` re-announced for a PR nobody looked at, or "a new review landed" for a review that arrived yesterday. A failed poll keeps the last known state, says why on stderr, and compares nothing.
 
+**Capture the diagnostic, but not into the answer.** Keeping a failed call's stderr means `cmd 2>&1`, and that is the trap: `gh` is not obliged to keep stderr empty when it *succeeds*. One upgrade notice appended to `$(gh repo view …)` becomes part of the repo slug passed to every later `--repo` flag, and appended to a `--json` call it reaches `jq` as trailing garbage. Both then look exactly like the API being down. stderr goes to a file, read only on the failure branch; the value keeps stdout alone.
+
 **Some reviewers review once and never come back.** A built-in reviewer that runs on open may not re-review your fix commits and may not be requestable, so waiting for a second pass waits forever. The consequence: on a multi-commit PR, your own review of the final commit is load-bearing.
 
 **Some reviewers post where you aren't looking.** A CI action's review summary can arrive as an *issue* comment, which the pull-request comment endpoints do not return. One setup had three channels; reading two of them merged a real defect.

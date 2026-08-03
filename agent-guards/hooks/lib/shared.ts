@@ -49,6 +49,27 @@ export function readStdinJson(raw?: string): HookInput | null {
   }
 }
 
+/**
+ * The whole prelude of a Bash-only PreToolUse guard: read the payload, ignore
+ * anything that is not a Bash call, and hand back the command with the payload
+ * it came from — or null when there is nothing to judge. Every Bash-only guard
+ * opened with these same four lines; the shape of "not for me, allow" is now
+ * stated once.
+ *
+ * It returns the payload, not just the command, because stdin can only be read
+ * ONCE: a guard that also needs `cwd` cannot call back for it, and the
+ * fallback-to-process.cwd() that a second empty read produces is silent and
+ * wrong (it is a real regression the cross-tree tests catch).
+ *
+ * `raw` is the same test-only seam readStdinJson exposes, forwarded unchanged.
+ */
+export function bashCall(raw?: string): { input: HookInput; cmd: string } | null {
+  const input = readStdinJson(raw);
+  if (!input || input.tool_name !== 'Bash') return null;
+  const cmd = commandOf(input);
+  return cmd ? { input, cmd } : null;
+}
+
 /** The Bash command from a PreToolUse payload. Both key spellings occur. */
 export function commandOf(input: HookInput): string {
   const ti = input.tool_input ?? {};
@@ -126,6 +147,25 @@ export function announceBypass(slug: string, reason: string, what: string): void
 export function block(slug: string, lines: string[]): never {
   process.stderr.write(['', `──── ${slug.toUpperCase()} — BLOCKED ────`, ...lines, '', ''].join('\n'));
   process.exit(2);
+}
+
+/**
+ * Run a guard's `main` as a hook process: fail open on our OWN bugs, then exit
+ * 0. Every guard's `import.meta.main` block was this same try/catch, and the
+ * catch is the load-bearing part — a guard that throws must not become a guard
+ * that blocks. A deliberate `block()` calls process.exit before reaching here,
+ * so this can never swallow one.
+ *
+ * Each call site keeps its own one-line note on what failing open costs there;
+ * the mechanism is the same everywhere.
+ */
+export function runHook(main: () => void): never {
+  try {
+    main();
+  } catch {
+    // Intentionally empty — see above.
+  }
+  process.exit(0);
 }
 
 /** Non-blocking context injection, the shape Claude Code expects. */

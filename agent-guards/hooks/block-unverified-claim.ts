@@ -78,6 +78,7 @@ import {
   log,
   readState,
   readStdinJson,
+  runHook,
   safeName,
   stateDir,
   writeState,
@@ -313,11 +314,5 @@ export function main(raw?: string): void {
   process.stdout.write(JSON.stringify({ decision: 'block', reason: decision.reason }) + '\n');
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch {
-    // Fail-open: a Stop hook must never be why a session cannot end.
-  }
-  process.exit(0);
-}
+// Fail-open: a Stop hook must never be why a session cannot end.
+if (import.meta.main) runHook(main);

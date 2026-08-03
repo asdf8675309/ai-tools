@@ -42,6 +42,7 @@ import {
   injectContext,
   readState,
   readStdinJson,
+  runHook,
   safeName,
   stateDir,
   wrapUntrusted,
@@ -180,11 +181,5 @@ export function main(raw?: string): void {
   if (message) injectContext('PostToolUse', message);
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch {
-    // Fail-open. The worst case of a bug here is a missing hint.
-  }
-  process.exit(0);
-}
+// Fail-open. The worst case of a bug here is a missing hint.
+if (import.meta.main) runHook(main);

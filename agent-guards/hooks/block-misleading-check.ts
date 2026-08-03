@@ -63,13 +63,12 @@ import { execFileSync } from 'node:child_process';
 import { resolve, isAbsolute } from 'node:path';
 import {
   announceBypass,
+  bashCall,
   block,
   bypassReason,
-  commandOf,
-  readStdinJson,
+  runHook,
   shellSegments,
   stripQuoted,
-  type HookInput,
 } from './lib/shared.ts';
 
 const PARENT = 'misleading-check';
@@ -272,12 +271,9 @@ function checkPipedCheck(command: string): void {
  *  the same test-only seam readStdinJson itself exposes. Every production
  *  call site (below) omits it. */
 export function main(raw?: string): void {
-  const input: HookInput | null = readStdinJson(raw);
-  if (!input) return;
-  if (input.tool_name !== 'Bash') return;
-
-  const cmd = commandOf(input);
-  if (!cmd) return;
+  const call = bashCall(raw);
+  if (!call) return;
+  const { input, cmd } = call;
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
 
   checkBareTsc(cmd);
@@ -285,11 +281,5 @@ export function main(raw?: string): void {
   checkPipedCheck(cmd);
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch {
-    // Fail-open on our OWN bugs. A deliberate block() exits before reaching here.
-  }
-  process.exit(0);
-}
+// Fail-open on our OWN bugs. A deliberate block() exits before reaching here.
+if (import.meta.main) runHook(main);

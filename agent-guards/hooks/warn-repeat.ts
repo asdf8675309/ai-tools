@@ -38,7 +38,7 @@
  */
 
 import { join } from 'node:path';
-import { injectContext, readState, readStdinJson, safeName, stateDir, writeState } from './lib/shared.ts';
+import { injectContext, readState, readStdinJson, runHook, safeName, stateDir, writeState } from './lib/shared.ts';
 
 const THRESHOLD = 0.6;
 const MIN_LENGTH = 20;
@@ -114,11 +114,5 @@ export function main(raw?: string): void {
   );
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch {
-    // Fail-open. Never let this hook stand between a user and their prompt.
-  }
-  process.exit(0);
-}
+// Fail-open. Never let this hook stand between a user and their prompt.
+if (import.meta.main) runHook(main);

@@ -60,7 +60,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { announceBypass, block, bypassReason, readStdinJson, type HookInput } from './lib/shared.ts';
+import { announceBypass, block, bypassReason, readStdinJson, runHook, type HookInput } from './lib/shared.ts';
 
 const SLUG = 'leaks';
 const CONFIG_NAME = '.agent-guards-forbidden';
@@ -284,11 +284,5 @@ export function main(raw?: string): void {
   }
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch {
-    // Fail-open on our OWN bugs; block() exits before reaching here.
-  }
-  process.exit(0);
-}
+// Fail-open on our OWN bugs; block() exits before reaching here.
+if (import.meta.main) runHook(main);

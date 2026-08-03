@@ -39,7 +39,7 @@
  *   Consider doing it in the GitHub UI instead — that is the point of the guard.
  */
 
-import { announceBypass, block, bypassReason, commandOf, readStdinJson } from './lib/shared.ts';
+import { announceBypass, bashCall, block, bypassReason, runHook } from './lib/shared.ts';
 
 const SLUG = 'public-repo';
 
@@ -82,10 +82,9 @@ export function evaluatePublicRepo(cmd: string): PublicRepoVerdict {
  *  the same test-only seam readStdinJson itself exposes. Every production
  *  call site (below) omits it. */
 export function main(raw?: string): void {
-  const input = readStdinJson(raw);
-  if (!input || input.tool_name !== 'Bash') return;
-  const cmd = commandOf(input);
-  if (!cmd) return;
+  const call = bashCall(raw);
+  if (!call) return;
+  const { cmd } = call;
 
   const verdict = evaluatePublicRepo(cmd);
   if (verdict.action === 'allow') return;
@@ -106,11 +105,5 @@ export function main(raw?: string): void {
   ]);
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch {
-    // Fail-open on our OWN bugs; block() exits before reaching here.
-  }
-  process.exit(0);
-}
+// Fail-open on our OWN bugs; block() exits before reaching here.
+if (import.meta.main) runHook(main);

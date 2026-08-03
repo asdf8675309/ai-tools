@@ -214,9 +214,18 @@ export function wrapUntrusted(text: string, max = 500): string {
 // Per-session scratch (loop windows, dedupe fingerprints) lives in the OS temp
 // dir, so it is wiped on reboot and never lands in your project or your home
 // config. Nothing here is durable, and nothing needs to be.
+//
+// The temp dir is world-writable on a shared host, and this state decides
+// whether a guard fires. Two consequences are handled: the root carries the
+// uid, so it is not a name another account is expected to share, and it is
+// created 0700, so a directory this process creates is not readable or
+// writable by anyone else.
+
+/** uid-scoped so two accounts on one host never share a state root. */
+const STATE_ROOT = `agent-guards-${typeof process.getuid === 'function' ? process.getuid() : 'nouid'}`;
 
 export function stateDir(name: string): string {
-  return join(tmpdir(), 'agent-guards', name);
+  return join(tmpdir(), STATE_ROOT, name);
 }
 
 export function safeName(id: unknown): string {
@@ -235,7 +244,7 @@ export function readState<T>(file: string, fallback: T): T {
 
 export function writeState(file: string, value: unknown): void {
   try {
-    mkdirSync(dirname(file), { recursive: true });
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     writeFileSync(file, JSON.stringify(value));
   } catch {
     // Best effort. Losing state can only cost a duplicate nudge.

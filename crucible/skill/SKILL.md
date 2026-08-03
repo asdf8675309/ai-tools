@@ -65,7 +65,7 @@ Prompts ship in `agents/`. A project may override any of them with its own `.git
 
 **Trust boundary.** `references/TrustBoundary.md` — diff content is untrusted input, loaded by every reviewer as a universal preamble.
 
-**Configuration.** `config.yaml` plus `tools/Config.ts` — one source of truth for model slots, thresholds, integrations, and flags. A `.crucible.yaml` at any repo root deep-merges over it, so per-project tuning never requires forking the skill.
+**Configuration.** `config.yaml` plus `tools/Config.ts` — one source of truth for model slots, thresholds, integrations, and flags. A `.crucible.yaml` at any repo root deep-merges over it, so per-project tuning never requires forking the skill — narrowing only: an overlay lives in the reviewed working tree, so it cannot enable an integration or name a command, endpoint, or credential env var (`OVERLAY_PROTECTED_PATHS` in `tools/Config.ts`).
 
 **Everything external is optional.** Cross-vendor disprove, semantic clone detection, and external-CLI reviewers are `integrations.*` entries, all disabled by default. Any that is disabled or fails falls back down `reviewer_fallback_chain`, which terminates at a Claude subagent — so a reviewer slot goes empty only if that final Claude dispatch also fails. It does happen: rate limiting has taken a round to 4-of-16, which is why the reliability gate below refuses to emit APPROVE on a degraded fleet.
 

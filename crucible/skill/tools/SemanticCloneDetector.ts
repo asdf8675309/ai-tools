@@ -311,6 +311,10 @@ export async function calibrate(fixturePath: string, endpoint?: EmbeddingEndpoin
  * version of each changed file that are absent from the base version.
  */
 export function extractNewFunctionsFromDiff(sinceRef: string, cwd = process.cwd()): FunctionRecord[] {
+  // `--end-of-options` so a `sinceRef` beginning with a dash is a bad revision
+  // rather than a git option: `--output=<path>` in that position makes `git diff`
+  // write a file of the caller's choosing.
+  //
   // Argument arrays, not a shell string. `file` below comes from this diff, which
   // means it is chosen by whoever authored the branch under review — and `$`,
   // backtick, `;` and `&` are all legal bytes in a POSIX filename that survive
@@ -318,7 +322,7 @@ export function extractNewFunctionsFromDiff(sinceRef: string, cwd = process.cwd(
   // filter and would execute through /bin/sh. LightPathClassifier and
   // RiskTierClassifier already use this form for the same reason.
   const changedFiles = execFileSync(
-    "git", ["diff", "--name-only", `${sinceRef}...HEAD`],
+    "git", ["diff", "--name-only", "--end-of-options", `${sinceRef}...HEAD`],
     { cwd, encoding: "utf8" },
   ).split("\n").filter((f) => /\.(ts|tsx|js|jsx)$/.test(f));
 
@@ -334,7 +338,7 @@ export function extractNewFunctionsFromDiff(sinceRef: string, cwd = process.cwd(
     try {
       // stderr ignored: a file that is new in HEAD makes `git show` print a
       // fatal, which is the expected path here, not an error worth surfacing.
-      baseSrc = execFileSync("git", ["show", `${sinceRef}:${file}`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      baseSrc = execFileSync("git", ["show", "--end-of-options", `${sinceRef}:${file}`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     } catch {
       baseSrc = ""; // file new in HEAD
     }

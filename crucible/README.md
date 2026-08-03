@@ -112,7 +112,7 @@ All off by default. Crucible runs a complete review with every one of these disa
 | **External CLI** | Vendor diversity in enumeration without a gateway | That CLI installed and authenticated |
 | **Verdict log** | A JSONL record of every disprove verdict, so you can decide empirically whether a cheaper model is safe in the authoritative slot | A local file that grows |
 
-Enable in `config.yaml`, or per-repo in a `.crucible.yaml` at your repo root. Secrets are referenced by environment-variable *name*, never by value.
+Enable in `config.yaml` — the skill's own copy, outside any repository. A `.crucible.yaml` at your repo root tunes a review but cannot turn an integration on or point one somewhere new; see [Configuration](#configuration). Secrets are referenced by environment-variable *name*, never by value.
 
 **`skill/config.example.yaml` is the worked non-default configuration** — what this looks like with the integrations actually wired up: a different vendor on the security lens, two roles swapped on measured precision, an external CLI running the tests, local embeddings for clone detection, and a cross-vendor second opinion gating every CRITICAL and HIGH finding.
 
@@ -133,6 +133,8 @@ Use the skill before you open a PR; use the Action to catch what reaches the PR 
 ## Configuration
 
 `config.yaml` in the skill directory is the default. A `.crucible.yaml` at any repo root deep-merges over it, so you can retune per project without forking the skill.
+
+**An overlay may narrow, never widen.** That file lives in the working tree of the code being reviewed, which `skill/references/TrustBoundary.md` calls untrusted throughout — so it is held to the same rule the light path already follows. An overlay cannot enable an integration (`integrations.*.enabled: true` is dropped; `false` is honoured) and cannot name a target: no `external_cli_map` or `local_model_map` entry, no `integrations.gateway.base_url`/`api_key_env`, no Metis `scan_image`/`network`/`compose_dir`/`llm.*_env`, no `verdict_log.path`. Everything else — thresholds, flags, model slots, added sensitive paths — merges as before. Dropped fields are named on stderr rather than ignored silently, and the authoritative list is `OVERLAY_PROTECTED_PATHS` in `skill/tools/Config.ts`.
 
 Worth knowing:
 

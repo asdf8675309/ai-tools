@@ -6,8 +6,16 @@
 #
 # This file is the other end — roughly how it gets run once the optional
 # integrations are wired up. Copy the parts you want into your own
-# `config.yaml`, or into a `.crucible.yaml` at a repo root to scope it to one
-# project.
+# `config.yaml` — the skill's own copy, outside any repository under review.
+#
+# NOT into a `.crucible.yaml` at a repo root. Most of what is below is exactly
+# what a project overlay is clamped from setting: every `integrations.*.enabled:
+# true`, every map entry naming a command or an endpoint, every `*_env` naming a
+# credential. That file lives in the working tree being reviewed, so it can turn
+# an integration OFF and retune thresholds, flags and model slots, but it cannot
+# switch one on or point one somewhere new — loadConfig() drops those fields and
+# says so on stderr. See "Configuration" in crucible/README.md, and
+# OVERLAY_PROTECTED_PATHS in tools/Config.ts for the authoritative list.
 #
 # WHY BOTHER: the skill's founding argument is that agreement between
 # independently-failing reviewers is the strongest signal a finding is real.

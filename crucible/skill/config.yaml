@@ -19,7 +19,11 @@
 #
 # Per-project overrides: drop a `.crucible.yaml` at your repo root. It is
 # resolved from the current working directory and deep-merged over this file,
-# so you can retune Crucible per repo without forking the skill.
+# so you can retune Crucible per repo without forking the skill. That file
+# lives in the tree under review, so it is clamped: it can turn an integration
+# off and retune thresholds, flags and model slots, but it cannot turn one on
+# or name a command, endpoint or credential env var. Dropped fields are
+# reported on stderr. See OVERLAY_PROTECTED_PATHS in tools/Config.ts.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reviewer model assignment

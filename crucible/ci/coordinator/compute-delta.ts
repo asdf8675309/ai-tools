@@ -419,7 +419,12 @@ function removeDismissedFromBucket(
     .filter((finding) => finding.status === "open");
 }
 
-function withCounters(state: CoordinatorState): CoordinatorState {
+/**
+ * Recount the status buckets from the findings themselves. Exported because
+ * call-coordinator.ts recounts after its own state edits and carried a private
+ * copy of this loop — two counters that had to be kept in step by hand.
+ */
+export function withCounters(state: CoordinatorState): CoordinatorState {
   const counters = {
     open: 0,
     resolved: 0,

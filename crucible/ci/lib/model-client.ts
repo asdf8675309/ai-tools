@@ -76,6 +76,28 @@ export function retryAfterMs(resp: Response): number | null {
   return clampDelay(dateMs - Date.now());
 }
 
+// ── Input budget and model selection ────────────────────────────────────────
+// Both chat callers size their prompt the same way: over LARGE_INPUT_CHARS swap
+// in the stronger model, over MAX_INPUT_CHARS (~80K tokens at 4 chars/token)
+// refuse the input entirely. The coordinator used to carry these as bare
+// literals in its own flow, which is how two callers end up disagreeing about
+// what "too large" means after one of them is tuned.
+export const LARGE_INPUT_CHARS = 30_000;
+export const MAX_INPUT_CHARS = 320_000;
+export const MAX_OUTPUT_TOKENS = 8192;
+
+// `modelLarge || model` is re-applied here, not just where the env is read: an
+// empty REVIEW_MODEL_LARGE must never resolve to an empty model name on a large
+// input.
+export function selectModel(
+  totalChars: number,
+  model: string,
+  modelLarge: string,
+): { sizeTag: "large" | "standard"; model: string } {
+  const sizeTag: "large" | "standard" = totalChars > LARGE_INPUT_CHARS ? "large" : "standard";
+  return { sizeTag, model: sizeTag === "large" ? modelLarge || model : model };
+}
+
 export interface ModelCallResult {
   resp?: Response;
   networkErrorMsg?: string;
@@ -139,6 +161,47 @@ export async function callModelWithRetry(
 
 // ── The one request shape ────────────────────────────────────────────────────
 
+// A configured base URL with a trailing slash would otherwise produce a double
+// slash, which some gateways route differently (or 404).
+export function chatCompletionsUrl(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+}
+
+// The attribution metadata rides in a custom HEADER, never the request body:
+// strict OpenAI-compatible servers reject unknown body fields. An empty header
+// name means no extra header at all.
+export function buildModelHeaders(
+  token: string,
+  metadataHeader: string,
+  metadata: Record<string, string>,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+  if (metadataHeader) headers[metadataHeader] = JSON.stringify(metadata);
+  return headers;
+}
+
+export function buildModelBody(
+  model: string,
+  prompt: string,
+  maxTokens: number = MAX_OUTPUT_TOKENS,
+): string {
+  return JSON.stringify({
+    model,
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content: prompt }],
+  });
+}
+
+/** The subset of an OpenAI-compatible response both callers read. */
+export interface ChatCompletionResponse {
+  choices?: Array<{ message?: { content?: string } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  model?: string;
+}
+
 export interface ChatCompletionParams {
   /** OpenAI-compatible endpoint prefix, e.g. https://host/v1. `/chat/completions` is appended. */
   baseUrl: string;
@@ -150,10 +213,10 @@ export interface ChatCompletionParams {
   maxTokens: number;
   /** Optional per-request attribution header some gateways read (name + JSON value). */
   metadataHeader?: string;
-  metadata?: unknown;
+  metadata?: Record<string, string>;
   /** Test seams — default to the real implementations. */
   sleep?: (ms: number) => Promise<void>;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
   log?: (msg: string) => void;
 }
 
@@ -164,21 +227,12 @@ export interface ChatCompletionParams {
  */
 export function chatCompletion(p: ChatCompletionParams): Promise<ModelCallResult> {
   const doFetch = p.fetchImpl ?? fetch;
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${p.token}`,
-    "Content-Type": "application/json",
-  };
-  if (p.metadataHeader) headers[p.metadataHeader] = JSON.stringify(p.metadata ?? {});
-
-  const body = JSON.stringify({
-    model: p.model,
-    max_tokens: p.maxTokens,
-    messages: [{ role: "user", content: p.prompt }],
-  });
+  const headers = buildModelHeaders(p.token, p.metadataHeader ?? "", p.metadata ?? {});
+  const body = buildModelBody(p.model, p.prompt, p.maxTokens);
 
   return callModelWithRetry(
     (attempt) =>
-      doFetch(`${p.baseUrl}/chat/completions`, {
+      doFetch(chatCompletionsUrl(p.baseUrl), {
         method: "POST",
         headers,
         body,

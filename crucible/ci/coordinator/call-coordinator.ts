@@ -22,13 +22,26 @@ import { parseStateComment } from "./parse-state.ts";
 import {
   computeDelta,
   detectForcePush,
+  withCounters,
   type ComputeDeltaOptions,
   type ComputeDeltaResult,
   type SourceFinding,
 } from "./compute-delta.ts";
 import { parseDismissalCommands, type DismissalComment } from "./parse-dismissals.ts";
 import type { CoordinatorState, FindingSeverity, StateFinding } from "./state-schema.ts";
-import { chatCompletion } from "../lib/model-client.ts";
+import {
+  chatCompletion,
+  selectModel,
+  MAX_INPUT_CHARS,
+  MAX_OUTPUT_TOKENS,
+  type ChatCompletionResponse,
+} from "../lib/model-client.ts";
+// The scrubber and the verdict glyphs are shared with call-reviewer.ts, which
+// used to hold its own byte-identical copy of each. Re-exported because the
+// coordinator's tests reach for them through this module.
+import { scrubSecrets } from "../lib/scrub.ts";
+import { verdictEmoji } from "../lib/verdict.ts";
+export { scrubSecrets };
 
 const TOKEN = process.env.REVIEW_API_TOKEN;
 const PR = Number(process.env.PR_NUMBER);
@@ -160,11 +173,10 @@ export async function main(deps: { sleep?: (ms: number) => Promise<void> } = {})
     const fullPrompt = buildPrompt(promptTemplate, String(PR), promptSurfacesJson);
 
     const totalChars = fullPrompt.length;
-    const sizeTag = totalChars > 30_000 ? "large" : "standard";
-    const model = sizeTag === "large" ? MODEL_LARGE : MODEL;
+    const { sizeTag, model } = selectModel(totalChars, MODEL, MODEL_LARGE);
 
     // Token-budget guard: stop if input is over ~80K tokens (≈320K chars).
-    if (totalChars > 320_000) {
+    if (totalChars > MAX_INPUT_CHARS) {
       await safePostComment(buildBudgetBlockedComment(totalChars));
       console.error(`[coordinator] input too large (${totalChars} chars) — posted TOO_LARGE comment`);
       return;
@@ -194,7 +206,7 @@ export async function main(deps: { sleep?: (ms: number) => Promise<void> } = {})
       token: TOKEN,
       model,
       prompt: fullPrompt,
-      maxTokens: 8192,
+      maxTokens: MAX_OUTPUT_TOKENS,
       metadataHeader: METADATA_HEADER || undefined,
       metadata,
       sleep: deps.sleep,
@@ -225,11 +237,7 @@ export async function main(deps: { sleep?: (ms: number) => Promise<void> } = {})
       return;
     }
 
-    const data = (await resp.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-      model?: string;
-    };
+    const data = (await resp.json()) as ChatCompletionResponse;
 
     // Always persist the full response BEFORE the empty-content check, so the
     // artifact upload preserves visibility regardless of outcome. Without this,
@@ -642,13 +650,6 @@ export function runGit(args: string[]): { ok: boolean } {
   }
 }
 
-function verdictEmoji(v: string): string {
-  if (v === "APPROVE") return "✅";
-  if (v === "APPROVE_WITH_COMMENTS") return "⚠️";
-  if (v === "BLOCK") return "🛑";
-  return "❓";
-}
-
 export function buildVerdictComment(out: CoordinatorOutput, meta: RenderMeta): string {
   // `?? []` for the reason call-reviewer.ts states above countAll(): a model may
   // legitimately return only `{verdict, summary_line}` — a clean APPROVE has
@@ -913,7 +914,7 @@ function fitStateForComment(state: CoordinatorState): CoordinatorState {
       if (finding && CLOSED_STATUSES.includes(finding.status)) dropSet.add(i);
     }
     if (dropSet.size === 0) break;
-    working = withStateCounters({
+    working = withCounters({
       ...working,
       findings: working.findings.filter((_, i) => !dropSet.has(i)),
     });
@@ -937,44 +938,6 @@ function cloneState(state: CoordinatorState): CoordinatorState {
     findings: state.findings.map((finding) => ({ ...finding })),
     counters: { ...state.counters },
   };
-}
-
-function withStateCounters(state: CoordinatorState): CoordinatorState {
-  const counters = {
-    open: 0,
-    resolved: 0,
-    dismissed: 0,
-    reemerged: 0,
-    total_ever_seen: state.findings.length,
-  };
-  for (const finding of state.findings) {
-    if (finding.status === "open") counters.open += 1;
-    if (finding.status === "resolved") counters.resolved += 1;
-    if (finding.status === "dismissed" || finding.status === "permanently_dismissed") {
-      counters.dismissed += 1;
-    }
-    if (finding.status === "reemerged") counters.reemerged += 1;
-  }
-  return { ...state, counters };
-}
-
-// Same scrubber as call-reviewer.ts. Kept duplicated rather than shared: this
-// script and the reviewer are deployed by different mechanisms (in-place vs
-// copied to /tmp), and a shared module would 404 in the copied case.
-//
-// The generic fallback requires length ≥ 48 AND mixed case AND ≥ 1 digit, so
-// plain hex (commit SHAs, sha256/sha512) passes through — which is also why the
-// state-comment guard above is defense-in-depth rather than load-bearing today.
-export function scrubSecrets(s: string): string {
-  return s
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]")
-    .replace(/\b(ghp_|gho_|ghu_|ghs_|ghr_|sk-ant-|sk-|sk_|cf_|xoxb-|xoxp-)[A-Za-z0-9_-]+/g, "[REDACTED-PREFIXED-TOKEN]")
-    .replace(/\b[A-Za-z0-9_-]{48,}\b/g, (match) => {
-      const hasUpper = /[A-Z]/.test(match);
-      const hasLower = /[a-z]/.test(match);
-      const hasDigit = /[0-9]/.test(match);
-      return hasUpper && hasLower && hasDigit ? "[REDACTED-TOKEN-SHAPE]" : match;
-    });
 }
 
 // Wrap postComment in try/catch so failures during error-reporting paths don't

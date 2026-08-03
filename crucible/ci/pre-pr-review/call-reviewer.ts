@@ -3,9 +3,10 @@
 // parses the JSON response, and posts a sticky `<!-- pre-pr-review -->` comment
 // on the PR.
 //
-// The workflow copies THIS FILE ALONE to /tmp from a trusted checkout of the
-// default branch and runs `bun /tmp/call-reviewer.ts`, so every helper stays
-// in-file — a sibling import would 404 at runtime.
+// The workflow stages this file at /tmp from a trusted checkout of the default
+// branch, PRESERVING the directory layout, so the `../lib/*` imports below
+// resolve there — anything shared with the coordinator lives in `lib/` and is
+// copied alongside. A helper added to `lib/` must be added to that copy list.
 //
 // The pipeline lives in `runReview(env, io)`, which takes every side effect it
 // needs as an injected dependency and RETURNS an exit code instead of calling
@@ -130,52 +131,47 @@ export function buildPrompt(
   return template.replace(PLACEHOLDERS, (m) => map[m] ?? m);
 }
 
-// The model-call retry envelope lives in ../lib/model-client.ts — the ONE place
-// a CI script talks to a model. Imported (for this file's own call site) and
-// re-exported (so this file's tests keep resolving them). The implementation is
-// shared with call-coordinator.ts, so the two cannot drift apart the way they
-// once did — the coordinator had no retry at all while this file had a full one.
+// The model call — request shape, retry envelope, input budget and model choice
+// — lives in ../lib/model-client.ts, the ONE place a CI script talks to a model.
+// Imported (for this file's own call site) and re-exported (so this file's tests
+// keep resolving them). The implementation is shared with call-coordinator.ts,
+// so the two cannot drift apart the way they once did — the coordinator had no
+// retry at all while this file had a full one, and carried its own copy of the
+// size thresholds.
 import {
   callModelWithRetry,
+  chatCompletion,
+  chatCompletionsUrl,
+  buildModelHeaders,
+  buildModelBody,
+  selectModel,
   fetchTimeoutMs,
   isTransientStatus,
   clampDelay,
   retryAfterMs,
+  LARGE_INPUT_CHARS,
+  MAX_INPUT_CHARS,
+  MAX_OUTPUT_TOKENS,
   MAX_RETRY_DELAY_MS,
+  type ChatCompletionResponse,
   type ModelCallResult,
 } from "../lib/model-client.ts";
 export {
   callModelWithRetry,
+  chatCompletionsUrl,
+  buildModelHeaders,
+  buildModelBody,
+  selectModel,
   fetchTimeoutMs,
   isTransientStatus,
   clampDelay,
   retryAfterMs,
+  LARGE_INPUT_CHARS,
+  MAX_INPUT_CHARS,
+  MAX_OUTPUT_TOKENS,
   MAX_RETRY_DELAY_MS,
   type ModelCallResult,
 };
-
-// Over LARGE_INPUT_CHARS the call swaps in the stronger model; over
-// MAX_INPUT_CHARS (~80K tokens at 4 chars/token) it refuses the PR entirely.
-export const LARGE_INPUT_CHARS = 30_000;
-export const MAX_INPUT_CHARS = 320_000;
-export const MAX_OUTPUT_TOKENS = 8192;
-
-// `modelLarge || model` is re-applied here, not just at module init: an empty
-// REVIEW_MODEL_LARGE must never resolve to an empty model name on a large PR.
-export function selectModel(
-  totalChars: number,
-  model: string,
-  modelLarge: string,
-): { sizeTag: "large" | "standard"; model: string } {
-  const sizeTag: "large" | "standard" = totalChars > LARGE_INPUT_CHARS ? "large" : "standard";
-  return { sizeTag, model: sizeTag === "large" ? modelLarge || model : model };
-}
-
-// A configured base URL with a trailing slash would otherwise produce a double
-// slash, which some gateways route differently (or 404).
-export function chatCompletionsUrl(baseUrl: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
-}
 
 export function buildMetadata(
   pr: number,
@@ -190,30 +186,6 @@ export function buildMetadata(
     file_count: String(fileCount),
     total_chars: String(totalChars),
   };
-}
-
-// The attribution metadata rides in a custom HEADER, never the request body:
-// strict OpenAI-compatible servers reject unknown body fields. An unset
-// REVIEW_METADATA_HEADER means no extra header at all.
-export function buildModelHeaders(
-  token: string,
-  metadataHeader: string,
-  metadata: Record<string, string>,
-): Record<string, string> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-  if (metadataHeader) headers[metadataHeader] = JSON.stringify(metadata);
-  return headers;
-}
-
-export function buildModelBody(model: string, prompt: string): string {
-  return JSON.stringify({
-    model,
-    max_tokens: MAX_OUTPUT_TOKENS,
-    messages: [{ role: "user", content: prompt }],
-  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -244,12 +216,10 @@ interface RenderMeta {
   runUrl: string;
 }
 
-export function verdictEmoji(v: string): string {
-  if (v === "APPROVE") return "✅";
-  if (v === "APPROVE_WITH_COMMENTS") return "⚠️";
-  if (v === "BLOCK") return "🛑";
-  return "❓";
-}
+// Shared with call-coordinator.ts — one verdict-to-glyph table for both sticky
+// comments. Re-exported so this file's tests keep resolving it.
+import { verdictEmoji } from "../lib/verdict.ts";
+export { verdictEmoji };
 
 // All section accessors below tolerate a model that omits a section (e.g.
 // returns only `{verdict, summary_line}`). `?? []` turns a missing section into
@@ -456,34 +426,12 @@ export function readReviewerInputs(
   }
 }
 
-// Scrub Bearer-token-shaped strings + known-prefix API keys + a tightened
-// long-alnum token-shape heuristic from any text destined for a public surface.
-// Catches the defense-in-depth case where an upstream provider error echoes the
-// Authorization header back in its response body.
-//
-// An earlier heuristic `\b[A-Za-z0-9_-]{40,}\b` was too broad — it redacted
-// SHA-256 hashes (64 hex), git commit SHAs (40 hex), npm sha512 lockfile hashes,
-// and base64 chunks, stripping useful diagnostic info from DEGRADED /
-// PARSE_ERROR excerpts. Tightened:
-//   - explicit Bearer / known-prefix anchors run first (always redact)
-//   - generic fallback requires length ≥ 48 AND mixed case AND ≥ 1 digit
-// Plain hex (commit SHAs, sha256/sha512) is single-case + digits but not mixed
-// case, so it passes through. Base64 chunks of arbitrary content still match
-// (mixed case + digits) — accepted trade-off, since base64 is a common API-key
-// encoding and the alternative is leaving real secrets in public output.
-export function scrubSecrets(s: string): string {
-  return s
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]")
-    // Known secret prefixes — redact regardless of shape characteristics.
-    .replace(/\b(ghp_|gho_|ghu_|ghs_|ghr_|sk-ant-|sk-|sk_|cf_|xoxb-|xoxp-)[A-Za-z0-9_-]+/g, "[REDACTED-PREFIXED-TOKEN]")
-    // Tightened generic heuristic: ≥48 chars, mixed case, at least one digit.
-    .replace(/\b[A-Za-z0-9_-]{48,}\b/g, (match) => {
-      const hasUpper = /[A-Z]/.test(match);
-      const hasLower = /[a-z]/.test(match);
-      const hasDigit = /[0-9]/.test(match);
-      return hasUpper && hasLower && hasDigit ? "[REDACTED-TOKEN-SHAPE]" : match;
-    });
-}
+// The scrubber every public-facing string goes through lives in ../lib/scrub.ts,
+// shared with call-coordinator.ts — the two used to hold byte-identical copies of
+// the highest-stakes function in either file. Re-exported so this file's tests
+// keep resolving it.
+import { scrubSecrets } from "../lib/scrub.ts";
+export { scrubSecrets };
 
 // Wrap the post in try/catch so failures during error-reporting paths don't
 // mask the original failure in the run log. Without this, a `gh` PATCH/POST
@@ -640,16 +588,17 @@ export async function runReview(env: ReviewEnv, io: ReviewIo): Promise<number> {
   );
 
   const t0 = io.now();
-  const { resp, networkErrorMsg } = await callModelWithRetry(
-    (attempt) =>
-      io.fetchImpl(chatCompletionsUrl(env.baseUrl), {
-        method: "POST",
-        headers: buildModelHeaders(env.token, env.metadataHeader, metadata),
-        body: buildModelBody(model, fullPrompt),
-        signal: AbortSignal.timeout(fetchTimeoutMs(attempt)),
-      }),
-    io.sleep,
-  );
+  const { resp, networkErrorMsg } = await chatCompletion({
+    baseUrl: env.baseUrl,
+    token: env.token,
+    model,
+    prompt: fullPrompt,
+    maxTokens: MAX_OUTPUT_TOKENS,
+    metadataHeader: env.metadataHeader,
+    metadata,
+    fetchImpl: io.fetchImpl,
+    sleep: io.sleep,
+  });
 
   const durationMs = io.now() - t0;
 
@@ -671,11 +620,7 @@ export async function runReview(env: ReviewEnv, io: ReviewIo): Promise<number> {
     return 1;
   }
 
-  const data = (await resp.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    model?: string;
-  };
+  const data = (await resp.json()) as ChatCompletionResponse;
 
   // Always persist the full response BEFORE the empty-content check, so the
   // artifact upload preserves visibility regardless of outcome. Without this, an

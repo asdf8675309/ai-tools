@@ -51,9 +51,17 @@ interface StopInput {
 
 try {
   main();
-} catch {
-  // Fail-open as a writer: swallow any error, write nothing, exit clean.
+} catch (e) {
+  // Fail-open as a writer: write nothing, exit clean. Reported on stderr all
+  // the same — silence here is indistinguishable from "the review wasn't good
+  // enough", and the two have opposite fixes. From the gate's side both look
+  // like a missing marker, so this line is the only place the difference shows.
+  console.error(`[crucible mark-review] internal error — no marker written: ${errorText(e)}`);
   process.exit(0);
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? (e.stack ?? e.message) : String(e);
 }
 
 function main(): void {

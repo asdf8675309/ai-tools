@@ -62,10 +62,17 @@ interface HookInput {
 
 try {
   hookMain();
-} catch {
+} catch (e) {
   // Fail-open on our OWN bugs — never let an internal crash in this hook
   // block a PR. A deliberate block always goes through block() below,
   // which exits directly and can't reach this catch.
+  //
+  // Announced, though: an allow that came from a crash is not an allow that
+  // came from a marker, and a gate crashing on every invocation looks exactly
+  // like a gate that keeps finding a valid review.
+  console.error(
+    `[crucible gate] internal error — allowing this PR ungated: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
+  );
   process.exit(0);
 }
 
@@ -111,10 +118,14 @@ function hookMain(): void {
         process.exit(0);
       }
     }
-  } catch {
+  } catch (e) {
     // Any failure here (no network, unparseable base, ...) just falls
     // through to the marker check below — a diff we couldn't classify is
-    // never treated as light.
+    // never treated as light. Named, so a docs-only PR that unexpectedly
+    // hits the gate says why rather than reading as a broken light path.
+    console.error(
+      `[crucible gate] could not classify the diff — falling through to the marker check: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 
   const path = markerPath(ctx.stateDir, ctx.branch, ctx.sha);

@@ -8,7 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -296,6 +296,23 @@ describe("locking", () => {
     const records = JSON.parse(run(dir, "list", "--output", "json").stdout);
     const opened = records[0].issues.filter((i: { status: string }) => i.status === "pr-opened");
     expect(opened).toHaveLength(5);
+  });
+
+  test("a lock error that is NOT contention says what it was, instead of a stale-lock timeout", () => {
+    const dir = stateDir();
+    dispatch(dir, "5");
+    // EACCES, not EEXIST. Retrying it 100 times cannot help, and the timeout
+    // message ("remove it if stale") points at a lock file that does not exist.
+    chmodSync(dir, 0o500);
+    try {
+      const r = run(dir, "update", "--sprint-id", "s1", "--issue", "5", "--status", "pr-opened");
+      expect(r.code).toBe(1);
+      const { error } = JSON.parse(r.stderr);
+      expect(error).toContain("cannot acquire");
+      expect(error).not.toContain("timed out");
+    } finally {
+      chmodSync(dir, 0o700);
+    }
   });
 
   test("a rejected argument leaves no stale lock behind", () => {

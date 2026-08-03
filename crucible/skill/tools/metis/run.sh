@@ -83,7 +83,14 @@ if [ -z "$WORKSPACE" ] || [ ! -d "$WORKSPACE" ]; then
   metis_say "✗ metis/run: could not create a temp workspace"
   exit 1
 fi
-chmod 700 "$WORKSPACE" 2>/dev/null
+# Hard failure, not best-effort: metis.yaml below carries the database password
+# for the whole run. A chmod that did not take leaves it in a world-readable
+# directory, and "the scan ran" is not worth finding that out afterwards.
+if ! chmod 700 "$WORKSPACE"; then
+  metis_say "✗ metis/run: could not restrict permissions on ${WORKSPACE} — refusing to write credentials there"
+  rm -rf "$WORKSPACE"
+  exit 1
+fi
 metis_scan_begin
 trap 'metis_scan_end; rm -rf "$WORKSPACE"' EXIT INT TERM
 
@@ -146,7 +153,14 @@ embedding_provider:
 YAML
   [ -n "$BASE_URL" ] && printf '  base_url: "%s"\n' "$y_base_url"
 } > "${WORKSPACE}/metis.yaml"
-chmod 600 "${WORKSPACE}/metis.yaml" 2>/dev/null
+if [ ! -s "${WORKSPACE}/metis.yaml" ]; then
+  metis_say "✗ metis/run: failed to write ${WORKSPACE}/metis.yaml"
+  exit 1
+fi
+if ! chmod 600 "${WORKSPACE}/metis.yaml"; then
+  metis_say "✗ metis/run: could not restrict permissions on ${WORKSPACE}/metis.yaml — it holds the database password"
+  exit 1
+fi
 
 DOCKER_FLAGS=()
 METIS_FLAGS=()
@@ -161,9 +175,19 @@ fi
 # An indexed project gets the vector-index tools; an unindexed one would only
 # pay for retrieval that cannot answer. Upstream's tool selection is --tools,
 # and the index tool is opt-in — off unless asked for.
-SCHEMA_EXISTS="$(docker exec "$CRUCIBLE_METIS_POSTGRES_CONTAINER" \
+# A probe that FAILS is not an answer of "no schema": it means index/navigation
+# tool selection below is being decided on no information. Said out loud, since
+# the run continues either way and the degradation is otherwise invisible.
+#
+# stderr goes to a file rather than into the value: psql notices on a SUCCESSFUL
+# probe would otherwise land in SCHEMA_EXISTS and stop it comparing equal to "1".
+SCHEMA_PROBE_ERR="${WORKSPACE}/schema-probe.err"
+if ! SCHEMA_EXISTS="$(docker exec "$CRUCIBLE_METIS_POSTGRES_CONTAINER" \
   psql -U "$CRUCIBLE_METIS_DB_USER" -d "$CRUCIBLE_METIS_DB_NAME" -tAc \
-  "SELECT 1 FROM information_schema.schemata WHERE schema_name = '${SCHEMA}'" 2>/dev/null)"
+  "SELECT 1 FROM information_schema.schemata WHERE schema_name = '${SCHEMA}'" 2>"$SCHEMA_PROBE_ERR")"; then
+  metis_say "→ metis/run: could not check whether schema ${SCHEMA} exists — assuming not indexed ($(head -n 1 "$SCHEMA_PROBE_ERR"))"
+  SCHEMA_EXISTS=""
+fi
 
 # index/update/ask REQUIRE the index tool, and the very first `index` run is
 # exactly the case where no schema exists yet — detecting on the schema alone
@@ -202,7 +226,13 @@ docker run --rm "$TTY_FLAG" \
 RUN_STATUS=$?
 
 if [ -n "$METIS_COMMAND" ] && [ -f "${WORKSPACE}/review-results.json" ]; then
-  [ -n "$OUTPUT_FILE" ] && cp "${WORKSPACE}/review-results.json" "$OUTPUT_FILE"
+  # A failed copy used to leave RUN_STATUS=0 with no file at --output: the caller
+  # asked for results at a path, got none, and nothing said so. The results still
+  # go to stdout — but the exit status stops claiming success.
+  if [ -n "$OUTPUT_FILE" ] && ! cp "${WORKSPACE}/review-results.json" "$OUTPUT_FILE"; then
+    metis_say "✗ metis/run: could not write results to ${OUTPUT_FILE}"
+    [ "$RUN_STATUS" -eq 0 ] && RUN_STATUS=1
+  fi
   cat "${WORKSPACE}/review-results.json"
 fi
 

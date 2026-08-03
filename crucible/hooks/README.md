@@ -139,6 +139,8 @@ These hooks fail in two different directions on purpose, and the distinction mat
 - **Fail-closed on the review question.** No marker, a stale marker, a marker that doesn't parse, a marker with too few tags — every one of these means "I cannot confirm a review happened," and the gate blocks. That's the actual job of a gate: uncertainty about whether review happened has to mean no.
 - **Fail-open on this script's own bugs.** Unreadable stdin, a filesystem race, an unexpected exception in the hook's own code — none of these are allowed to permanently block your ability to open a PR. `gate-pr.ts` wraps its own logic in a top-level `try`/`catch` that exits 0 (allow) on anything unexpected; only a deliberate `block()` call — which is the reviewed, intentional code path — can produce the blocking exit code. `mark-review.ts` is fail-open by the same logic in the other direction: any internal error means *no marker gets written*, which is always the safe failure for a writer (it can never cause a false "review happened").
 
+Both directions are **announced, never silent**: the gate prints `internal error — allowing this PR ungated` before exiting 0, and `mark-review.ts` prints `internal error — no marker written`. Without those lines the two failures are unreadable from the outside — a crashing gate looks like a gate that keeps finding a valid review, and a crashing writer looks identical to "your review wasn't good enough", which is the one thing the block message tells you to go fix.
+
 If this hook ever wedges you in a way that isn't one of the documented block reasons above, that's a bug in this script, not a security feature — use the bypass, then please file an issue.
 
 ## Self-contained, deliberately

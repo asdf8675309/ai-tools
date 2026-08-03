@@ -275,6 +275,8 @@ These fail in two directions on purpose, and the distinction is the whole differ
 
 **Fail-open on the guard's own bugs.** Unreadable stdin, a filesystem race, an unexpected exception — none of these may permanently wedge your work. Every guard wraps its logic in a top-level `try`/`catch` that exits 0; only a deliberate `block()` call, which exits directly, can produce the blocking status.
 
+**Fail-open, never silent.** That catch prints `[agent-guards/<slug>] INTERNAL ERROR — guard did not run, allowing: …` on stderr, with the stack, and records it under `AGENT_GUARDS_LOG` if logging is on. Same rule as a bypass, for the same reason: an allow that came from a crash is not an allow that came from a clean scan, and a guard throwing on every single invocation otherwise looks exactly like a guard that keeps finding nothing wrong — for as long as nobody checks.
+
 The two are not in tension, because they answer different questions. "Is this command safe?" gets a strict answer. "Is this hook working?" gets a lenient one.
 
 **One documented exception.** `unverified-claim` fails open when it cannot read the transcript. A `Stop` hook that wedges a session is worse than a missed claim, and unlike a blocked command there is nothing to retry. An unreadable transcript means the guard is inoperable, not that the claim is suspect.

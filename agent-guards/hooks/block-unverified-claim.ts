@@ -74,6 +74,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   announceBypass,
+  announceFailOpen,
   bypassReason,
   log,
   readState,
@@ -316,8 +317,10 @@ export function main(raw?: string): void {
 if (import.meta.main) {
   try {
     main();
-  } catch {
-    // Fail-open: a Stop hook must never be why a session cannot end.
+  } catch (e) {
+    // Fail-open: a Stop hook must never be why a session cannot end. But it
+    // says so, or an unverified claim reads as one this guard cleared.
+    announceFailOpen(SLUG, e);
   }
   process.exit(0);
 }

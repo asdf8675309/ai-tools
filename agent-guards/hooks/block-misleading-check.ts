@@ -63,6 +63,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve, isAbsolute } from 'node:path';
 import {
   announceBypass,
+  announceFailOpen,
   block,
   bypassReason,
   commandOf,
@@ -288,8 +289,11 @@ export function main(raw?: string): void {
 if (import.meta.main) {
   try {
     main();
-  } catch {
-    // Fail-open on our OWN bugs. A deliberate block() exits before reaching here.
+  } catch (e) {
+    // Fail-open on our OWN bugs. A deliberate block() exits before reaching
+    // here. Announced, because a check that stopped running looks exactly like
+    // a check that found nothing.
+    announceFailOpen(PARENT, e);
   }
   process.exit(0);
 }

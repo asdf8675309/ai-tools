@@ -39,7 +39,7 @@
  *   Consider doing it in the GitHub UI instead — that is the point of the guard.
  */
 
-import { announceBypass, block, bypassReason, commandOf, readStdinJson } from './lib/shared.ts';
+import { announceBypass, announceFailOpen, block, bypassReason, commandOf, readStdinJson } from './lib/shared.ts';
 
 const SLUG = 'public-repo';
 
@@ -109,8 +109,10 @@ export function main(raw?: string): void {
 if (import.meta.main) {
   try {
     main();
-  } catch {
-    // Fail-open on our OWN bugs; block() exits before reaching here.
+  } catch (e) {
+    // Fail-open on our OWN bugs; block() exits before reaching here. Said out
+    // loud, because a guard that has been crashing silently is not a guard.
+    announceFailOpen(SLUG, e);
   }
   process.exit(0);
 }

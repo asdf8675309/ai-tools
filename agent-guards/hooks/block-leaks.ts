@@ -60,7 +60,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { announceBypass, block, bypassReason, readStdinJson, type HookInput } from './lib/shared.ts';
+import { announceBypass, announceFailOpen, block, bypassReason, readStdinJson, type HookInput } from './lib/shared.ts';
 
 const SLUG = 'leaks';
 const CONFIG_NAME = '.agent-guards-forbidden';
@@ -287,8 +287,10 @@ export function main(raw?: string): void {
 if (import.meta.main) {
   try {
     main();
-  } catch {
-    // Fail-open on our OWN bugs; block() exits before reaching here.
+  } catch (e) {
+    // Fail-open on our OWN bugs; block() exits before reaching here. Said out
+    // loud, because a guard that has been crashing silently is not a guard.
+    announceFailOpen(SLUG, e);
   }
   process.exit(0);
 }

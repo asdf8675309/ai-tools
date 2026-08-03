@@ -128,6 +128,26 @@ export function block(slug: string, lines: string[]): never {
   process.exit(2);
 }
 
+/**
+ * Report a fail-open: the guard hit a bug in its OWN logic and allowed.
+ *
+ * Fail-open is the right behaviour — a crash in here must never wedge a shell
+ * or a session. Being SILENT about it is not: a guard that has been throwing on
+ * every invocation for a month is indistinguishable from one that was never
+ * installed, and both read as "nothing to block". Same rule as a bypass, for
+ * the same reason: stderr, every time, naming the guard and the error.
+ *
+ * Stack, not just message — the point of the line is to be actionable, and
+ * `undefined is not an object` with no frame is not.
+ */
+export function announceFailOpen(slug: string, e: unknown): void {
+  const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+  process.stderr.write(
+    `[agent-guards/${slug}] INTERNAL ERROR — guard did not run, allowing: ${detail}\n`,
+  );
+  log({ guard: slug, action: 'fail-open', error: detail });
+}
+
 /** Non-blocking context injection, the shape Claude Code expects. */
 export function injectContext(event: string, message: string): void {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: message } }) + '\n');

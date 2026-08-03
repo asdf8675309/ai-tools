@@ -39,6 +39,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
+  announceFailOpen,
   injectContext,
   readState,
   readStdinJson,
@@ -183,8 +184,10 @@ export function main(raw?: string): void {
 if (import.meta.main) {
   try {
     main();
-  } catch {
-    // Fail-open. The worst case of a bug here is a missing hint.
+  } catch (e) {
+    // Fail-open. The worst case of a bug here is a missing hint — a missing hint
+    // nobody can tell apart from "no loop detected" unless it is announced.
+    announceFailOpen('loops', e);
   }
   process.exit(0);
 }

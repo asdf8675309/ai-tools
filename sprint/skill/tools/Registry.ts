@@ -115,7 +115,15 @@ function withLock<T>(date: string, fn: () => T): T {
     try {
       fd = openSync(lockPath, "wx");
       break;
-    } catch {
+    } catch (err) {
+      // EEXIST is the only error that MEANS contention. Retrying the others
+      // spends two seconds re-attempting something that cannot succeed and then
+      // reports "timed out waiting for the lock — remove it if stale", which
+      // sends you after a lock file that was never the problem: a read-only
+      // volume, a missing directory, EMFILE. Say what actually happened.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+        fail(`cannot acquire ${lockPath}: ${err instanceof Error ? err.message : String(err)}`);
+      }
       Bun.sleepSync(LOCK_WAIT_MS);
     }
   }

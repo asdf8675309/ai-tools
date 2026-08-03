@@ -109,13 +109,24 @@ export function redactUrl(url: string): string {
 }
 
 /** Read + JSON.parse this process's stdin. Never throws — returns {} on any
- *  failure, so callers can't be crashed by a hook harness sending odd input. */
+ *  failure, so callers can't be crashed by a hook harness sending odd input.
+ *
+ *  A failure IS reported on stderr: both hooks treat `{}` as "nothing to do",
+ *  so an unreadable payload silently turns the gate into a no-op — which is
+ *  exactly the state that looks, from the outside, like every PR passing. */
 export function readStdinJson<T>(): T {
+  let raw: string;
   try {
-    const raw = readFileSync('/dev/stdin', 'utf8');
-    if (!raw.trim()) return {} as T;
+    raw = readFileSync('/dev/stdin', 'utf8');
+  } catch (e) {
+    console.error(`[crucible hook] stdin unreadable, treating the payload as empty: ${e instanceof Error ? e.message : String(e)}`);
+    return {} as T;
+  }
+  if (!raw.trim()) return {} as T;
+  try {
     return JSON.parse(raw) as T;
-  } catch {
+  } catch (e) {
+    console.error(`[crucible hook] stdin is not JSON, treating the payload as empty: ${e instanceof Error ? e.message : String(e)}`);
     return {} as T;
   }
 }

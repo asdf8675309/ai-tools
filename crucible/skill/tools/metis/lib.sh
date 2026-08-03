@@ -31,7 +31,11 @@ metis_say() { printf '%s\n' "$*" >&2; }
 
 metis_is_macos() { [ "$(uname -s 2>/dev/null)" = "Darwin" ]; }
 
-metis_state_init() { mkdir -p "$CRUCIBLE_METIS_STATE_DIR" "$CRUCIBLE_METIS_SCAN_DIR" 2>/dev/null; }
+# Returns non-zero when the state directory could not be created — callers that
+# depend on it (metis_scan_begin) report rather than continuing blind.
+metis_state_init() {
+  mkdir -p "$CRUCIBLE_METIS_STATE_DIR" "$CRUCIBLE_METIS_SCAN_DIR" 2>/dev/null
+}
 
 # Repo root for a path, falling back to the path itself outside a work tree.
 metis_repo_root() {
@@ -91,8 +95,13 @@ metis_scan_container_running() {
 # A scan registers its PID for the duration of the run. Checking live PIDs beats
 # matching process names: the reaper stays correct however the caller is invoked.
 metis_scan_begin() {
-  metis_state_init
-  printf '%s\n' "$$" > "${CRUCIBLE_METIS_SCAN_DIR}/$$.pid" 2>/dev/null
+  # A PID file that did not get written makes this scan invisible to
+  # metis_scans_active, which is what stops the reaper shutting Docker down
+  # underneath a running scan. Still non-fatal — the scan works, it is just
+  # unprotected — so it warns instead of exiting, and stops being silent.
+  if ! metis_state_init || ! printf '%s\n' "$$" > "${CRUCIBLE_METIS_SCAN_DIR}/$$.pid" 2>/dev/null; then
+    metis_say "→ metis: could not register this scan in ${CRUCIBLE_METIS_SCAN_DIR} — the reaper may stop Docker mid-scan"
+  fi
 }
 metis_scan_end() { rm -f "${CRUCIBLE_METIS_SCAN_DIR}/$$.pid" 2>/dev/null; }
 

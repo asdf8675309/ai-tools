@@ -38,17 +38,7 @@
  */
 
 import { join } from 'node:path';
-import {
-  announceBypass,
-  announceFailOpen,
-  block,
-  bypassReason,
-  readState,
-  readStdinJson,
-  safeName,
-  stateDir,
-  writeState,
-} from './lib/shared.ts';
+import { announceBypass, block, bypassReason, readState, readStdinJson, runHook, safeName, stateDir, writeState } from './lib/shared.ts';
 
 const SLUG = 'task-flood';
 const DEFAULT_LIMIT = 50;
@@ -123,13 +113,5 @@ export function main(raw?: string): void {
   writeState(file, { key, count: count + 1 });
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch (e) {
-    // Fail-open on our OWN bugs; block() exits before reaching here. Said out
-    // loud, because a guard that has been crashing silently is not a guard.
-    announceFailOpen(SLUG, e);
-  }
-  process.exit(0);
-}
+// Fail-open on our OWN bugs; block() exits before reaching here.
+if (import.meta.main) runHook(SLUG, main);

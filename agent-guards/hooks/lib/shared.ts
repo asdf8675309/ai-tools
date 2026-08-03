@@ -49,6 +49,27 @@ export function readStdinJson(raw?: string): HookInput | null {
   }
 }
 
+/**
+ * The whole prelude of a Bash-only PreToolUse guard: read the payload, ignore
+ * anything that is not a Bash call, and hand back the command with the payload
+ * it came from — or null when there is nothing to judge. Every Bash-only guard
+ * opened with these same four lines; the shape of "not for me, allow" is now
+ * stated once.
+ *
+ * It returns the payload, not just the command, because stdin can only be read
+ * ONCE: a guard that also needs `cwd` cannot call back for it, and the
+ * fallback-to-process.cwd() that a second empty read produces is silent and
+ * wrong (it is a real regression the cross-tree tests catch).
+ *
+ * `raw` is the same test-only seam readStdinJson exposes, forwarded unchanged.
+ */
+export function bashCall(raw?: string): { input: HookInput; cmd: string } | null {
+  const input = readStdinJson(raw);
+  if (!input || input.tool_name !== 'Bash') return null;
+  const cmd = commandOf(input);
+  return cmd ? { input, cmd } : null;
+}
+
 /** The Bash command from a PreToolUse payload. Both key spellings occur. */
 export function commandOf(input: HookInput): string {
   const ti = input.tool_input ?? {};
@@ -146,6 +167,32 @@ export function announceFailOpen(slug: string, e: unknown): void {
     `[agent-guards/${slug}] INTERNAL ERROR — guard did not run, allowing: ${detail}\n`,
   );
   log({ guard: slug, action: 'fail-open', error: detail });
+}
+
+/**
+ * Run a guard's `main` as a hook process: fail open on our OWN bugs, announce
+ * it, then exit 0. Every guard's `import.meta.main` block was this same
+ * try/catch, and the catch is the load-bearing part — a guard that throws must
+ * not become a guard that blocks. A deliberate `block()` calls process.exit
+ * before reaching here, so this can never swallow one.
+ *
+ * The `slug` is required rather than optional precisely because this function
+ * is the merge point of two changes that pull in opposite directions: one
+ * collapsed nine copies of this try/catch into a single helper, the other made
+ * that same catch stop being silent. A no-arg `runHook(main)` would type-check
+ * with an empty catch and quietly undo the second — so the signature makes the
+ * announcement impossible to drop by accident.
+ *
+ * Each call site keeps its own one-line note on what failing open costs there;
+ * the mechanism is the same everywhere.
+ */
+export function runHook(slug: string, main: () => void): never {
+  try {
+    main();
+  } catch (e) {
+    announceFailOpen(slug, e);
+  }
+  process.exit(0);
 }
 
 /** Non-blocking context injection, the shape Claude Code expects. */

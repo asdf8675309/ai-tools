@@ -74,11 +74,11 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   announceBypass,
-  announceFailOpen,
   bypassReason,
   log,
   readState,
   readStdinJson,
+  runHook,
   safeName,
   stateDir,
   writeState,
@@ -314,13 +314,5 @@ export function main(raw?: string): void {
   process.stdout.write(JSON.stringify({ decision: 'block', reason: decision.reason }) + '\n');
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch (e) {
-    // Fail-open: a Stop hook must never be why a session cannot end. But it
-    // says so, or an unverified claim reads as one this guard cleared.
-    announceFailOpen(SLUG, e);
-  }
-  process.exit(0);
-}
+// Fail-open: a Stop hook must never be why a session cannot end.
+if (import.meta.main) runHook(SLUG, main);

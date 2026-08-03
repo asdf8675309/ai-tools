@@ -39,10 +39,10 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
-  announceFailOpen,
   injectContext,
   readState,
   readStdinJson,
+  runHook,
   safeName,
   stateDir,
   wrapUntrusted,
@@ -181,13 +181,5 @@ export function main(raw?: string): void {
   if (message) injectContext('PostToolUse', message);
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch (e) {
-    // Fail-open. The worst case of a bug here is a missing hint — a missing hint
-    // nobody can tell apart from "no loop detected" unless it is announced.
-    announceFailOpen('loops', e);
-  }
-  process.exit(0);
-}
+// Fail-open. The worst case of a bug here is a missing hint.
+if (import.meta.main) runHook('loops', main);

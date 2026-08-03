@@ -29,6 +29,7 @@ import {
   safeName,
   shellSegments,
   stateDir,
+  runHook,
   stripQuoted,
   tokenFor,
   UNTRUSTED_CLOSE,
@@ -36,6 +37,7 @@ import {
   wrapUntrusted,
   writeState,
 } from '../hooks/lib/shared.ts';
+import { withExitSpy } from './lib/exit-spy.ts';
 
 // ── readStdinJson — the fail-open primitive every guard's main() calls first ─
 
@@ -252,6 +254,39 @@ describe('announceFailOpen', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+// ── runHook — the epilogue every guard's import.meta.main block delegates to ─
+//
+// This helper is where two changes meet: one collapsed nine copies of the
+// top-level try/catch into a single function, the other made that catch stop
+// being silent. Resolved carelessly, the collapse silently wins and every guard
+// goes back to failing open without a word — with the whole suite still green,
+// because nothing else asserts the announcement. These tests are that assertion.
+
+describe('runHook', () => {
+  test('a throwing main still exits 0 — a crashing guard must not become a blocking one', () => {
+    const result = withExitSpy(() => runHook('egress', () => { throw new Error('guard bug'); }));
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('and says so, naming the guard it was given', () => {
+    const result = withExitSpy(() => runHook('egress', () => { throw new Error('guard bug'); }));
+    expect(result.stderr).toContain('[agent-guards/egress] INTERNAL ERROR — guard did not run, allowing: ');
+    expect(result.stderr).toContain('guard bug');
+  });
+
+  test('a clean main exits 0 and says nothing', () => {
+    const result = withExitSpy(() => runHook('egress', () => {}));
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  // The "a deliberate block() is not swallowed" half of runHook's contract is
+  // NOT assertable here, for the reason this file's header gives: withExitSpy
+  // turns process.exit(2) into a throw, which runHook's catch then sees and
+  // reports as a guard bug — the opposite of what a real exit does. It is
+  // covered where the real exit code is observable, in tests/guards.test.ts.
 });
 
 // ── injectContext — the non-blocking wire format ─────────────────────────

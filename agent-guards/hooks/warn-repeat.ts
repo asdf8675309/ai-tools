@@ -38,7 +38,7 @@
  */
 
 import { join } from 'node:path';
-import { announceFailOpen, injectContext, readState, readStdinJson, safeName, stateDir, writeState } from './lib/shared.ts';
+import { injectContext, readState, readStdinJson, runHook, safeName, stateDir, writeState } from './lib/shared.ts';
 
 const THRESHOLD = 0.6;
 const MIN_LENGTH = 20;
@@ -114,13 +114,5 @@ export function main(raw?: string): void {
   );
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch (e) {
-    // Fail-open. Never let this hook stand between a user and their prompt —
-    // but report the crash, or it looks like the hook simply had nothing to say.
-    announceFailOpen('repeat', e);
-  }
-  process.exit(0);
-}
+// Fail-open. Never let this hook stand between a user and their prompt.
+if (import.meta.main) runHook('repeat', main);

@@ -101,15 +101,22 @@ function main(): void {
   );
 }
 
-/** Scan this session's main transcript for tagged dispatches at/after headTime. */
-function collectFromMainTranscript(transcriptPath: string | undefined, headTime: number, roster: Set<string>): void {
-  if (!transcriptPath || !existsSync(transcriptPath)) return;
+/**
+ * One transcript's parseable JSONL lines, each paired with the message object it
+ * carries — some harnesses nest it under `message`, others write the fields on
+ * the line itself, and every scan below has to accept both. Unreadable file,
+ * blank lines and unparseable lines all yield nothing rather than throwing: a
+ * writer that cannot read its evidence must write no marker, never crash the
+ * hook (see the FAIL-OPEN AS A WRITER note at the top).
+ */
+function transcriptEntries(path: string): Array<{ entry: Record<string, unknown>; message: Record<string, unknown> }> {
   let raw: string;
   try {
-    raw = readFileSync(transcriptPath, 'utf8');
+    raw = readFileSync(path, 'utf8');
   } catch {
-    return;
+    return [];
   }
+  const entries: Array<{ entry: Record<string, unknown>; message: Record<string, unknown> }> = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let entry: Record<string, unknown>;
@@ -118,16 +125,28 @@ function collectFromMainTranscript(transcriptPath: string | undefined, headTime:
     } catch {
       continue;
     }
+    entries.push({ entry, message: (entry.message as Record<string, unknown> | undefined) ?? entry });
+  }
+  return entries;
+}
+
+/** A message's content blocks, or none when it carries text or nothing at all. */
+function contentBlocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
+  const content = message.content;
+  return Array.isArray(content) ? (content as Array<Record<string, unknown>>) : [];
+}
+
+/** Scan this session's main transcript for tagged dispatches at/after headTime. */
+function collectFromMainTranscript(transcriptPath: string | undefined, headTime: number, roster: Set<string>): void {
+  if (!transcriptPath || !existsSync(transcriptPath)) return;
+  for (const { entry, message } of transcriptEntries(transcriptPath)) {
     // Every transcript line carries its own timestamp — require it to
     // postdate the reviewed commit, so a stale review from before the last
     // push can never satisfy the NEW commit's marker.
     const ts = Date.parse(String(entry.timestamp ?? ''));
     if (!Number.isFinite(ts) || ts < headTime) continue;
 
-    const message = (entry.message as Record<string, unknown> | undefined) ?? entry;
-    const content = (message as Record<string, unknown>).content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content as Array<Record<string, unknown>>) {
+    for (const block of contentBlocks(message)) {
       if (block?.type !== 'tool_use') continue;
       if (!DISPATCH_TOOL_NAMES.has(String(block.name ?? ''))) continue;
       addTags(JSON.stringify(block.input ?? ''), roster);
@@ -191,24 +210,8 @@ function collectFromSubagentTranscripts(
 /** Number of tool_use blocks in a transcript — evidence the agent did work. */
 function toolUseCount(path: string): number {
   let n = 0;
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch {
-    return 0;
-  }
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    let entry: Record<string, unknown>;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const message = (entry.message as Record<string, unknown> | undefined) ?? entry;
-    const content = message.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content as Array<Record<string, unknown>>) {
+  for (const { message } of transcriptEntries(path)) {
+    for (const block of contentBlocks(message)) {
       if (block?.type === 'tool_use') n++;
     }
   }
@@ -217,26 +220,17 @@ function toolUseCount(path: string): number {
 
 /** Concatenate the assistant-authored text out of a transcript JSONL file. */
 function assistantText(path: string): string {
-  const raw = readFileSync(path, 'utf8');
   const parts: string[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    let entry: Record<string, unknown>;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const message = (entry.message as Record<string, unknown> | undefined) ?? entry;
+  for (const { entry, message } of transcriptEntries(path)) {
     const role = (message.role as string | undefined) ?? (entry.type as string | undefined);
     if (role !== 'assistant') continue;
     const content = message.content;
     if (typeof content === 'string') {
       parts.push(content);
-    } else if (Array.isArray(content)) {
-      for (const block of content as Array<Record<string, unknown>>) {
-        if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text);
-      }
+      continue;
+    }
+    for (const block of contentBlocks(message)) {
+      if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text);
     }
   }
   return parts.join('\n');

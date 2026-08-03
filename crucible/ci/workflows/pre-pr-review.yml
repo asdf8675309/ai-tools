@@ -236,8 +236,11 @@ jobs:
           # dead job is indistinguishable on the PR from a clean review.
           git fetch --no-tags origin "$DEFAULT_BRANCH"
           # Stage the scripts PRESERVING their directory layout, because
-          # call-reviewer.ts imports ../lib/model-client.ts (the shared model
-          # client). A flat copy to /tmp would break that relative import. The
+          # call-reviewer.ts imports ../lib/*.ts (the model client, the secret
+          # scrubber, the verdict glyphs — everything it shares with the
+          # coordinator). A flat copy to /tmp would break those relative
+          # imports, and a lib file missing from the list below 404s at
+          # runtime, so every helper it imports is copied here. The
           # prompt and every data file are still read from absolute /tmp paths,
           # so only the scripts need structure. All of it still comes from the
           # trusted checkout pinned to the default branch — same trust as before.
@@ -246,6 +249,8 @@ jobs:
           cp "trusted-checkout/$SCRIPTS_DIR/pre-pr-review/collect-diff.ts" /tmp/ci-scripts/pre-pr-review/collect-diff.ts
           cp "trusted-checkout/$SCRIPTS_DIR/pre-pr-review/call-reviewer.ts" /tmp/ci-scripts/pre-pr-review/call-reviewer.ts
           cp "trusted-checkout/$SCRIPTS_DIR/lib/model-client.ts" /tmp/ci-scripts/lib/model-client.ts
+          cp "trusted-checkout/$SCRIPTS_DIR/lib/scrub.ts" /tmp/ci-scripts/lib/scrub.ts
+          cp "trusted-checkout/$SCRIPTS_DIR/lib/verdict.ts" /tmp/ci-scripts/lib/verdict.ts
 
       # ── 6. Collect diff + file context ──────────────────────────────────
       - name: Collect diff + file context

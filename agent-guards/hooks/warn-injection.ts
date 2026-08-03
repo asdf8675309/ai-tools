@@ -48,7 +48,7 @@
  * BYPASS: AGENT_GUARDS_INJECTION=0, or AGENT_GUARDS_OFF=1.
  */
 
-import { announceFailOpen, injectContext, log, readStdinJson, wrapUntrusted } from './lib/shared.ts';
+import { injectContext, log, readStdinJson, runHook, wrapUntrusted } from './lib/shared.ts';
 
 interface Pattern {
   re: RegExp;
@@ -138,13 +138,5 @@ export function main(raw?: string): void {
   );
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch (e) {
-    // Fail-open. This hook can only ever add context; a bug must not cost more
-    // than the context it would have added — and never the knowledge that it did.
-    announceFailOpen('injection', e);
-  }
-  process.exit(0);
-}
+// Fail-open. This hook can only ever add context; a bug must not cost more.
+if (import.meta.main) runHook('injection', main);

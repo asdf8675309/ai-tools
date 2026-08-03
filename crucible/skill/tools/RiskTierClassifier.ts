@@ -22,8 +22,11 @@
  *   bun tools/RiskTierClassifier.ts classify [--base <ref>] [--json]
  */
 
-import { execFileSync } from "child_process";
+import { emitOutcome, flagValue, type CliOutcome } from "./Cli.ts";
+import { changedFiles } from "./GitDiff.ts";
 import type { RiskTierConfig } from "./Config.ts";
+
+export type { CliOutcome };
 
 export type RiskTier = "sensitive" | "normal";
 export interface RiskClassification {
@@ -129,12 +132,6 @@ export function isSensitiveTier(riskTier: { tier?: string } | undefined | null):
 //   stdout: "sensitive" | "normal"
 //   stderr: matched reasons
 
-export interface CliOutcome {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
 /**
  * CLI body, returning what it would print rather than printing it. Extracted so
  * the fail-toward-sensitive branch is assertable in-process; the
@@ -149,18 +146,12 @@ export async function runClassifyRiskCli(argv: string[], cwd: string): Promise<C
       exitCode: 1,
     };
   }
-  const baseIdx = argv.indexOf("--base");
-  const base = baseIdx >= 0 ? argv[baseIdx + 1] : "origin/main";
+  const base = flagValue(argv, "--base", "origin/main");
   const asJson = argv.includes("--json");
   try {
-    // `--end-of-options` so `--base --output=<path>` is a bad revision rather than
-    // a git option that writes a file where the caller asked.
-    const out = execFileSync("git", ["diff", "--name-only", "--no-renames", "--end-of-options", `${base}...HEAD`], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const files = out.split("\n").map((l) => l.trim()).filter(Boolean);
+    // --no-renames for the same reason LightPathClassifier needs it: a rename
+    // must arrive as two single-path entries, not `old => new`.
+    const files = changedFiles(cwd, base, { noRenames: true });
     // Late import so a Config fault fails toward sensitive rather than crashing.
     const { loadRiskTierConfig } = await import("./Config.ts");
     const result = classifyRisk(files, loadRiskTierConfig());
@@ -187,8 +178,5 @@ export async function runClassifyRiskCli(argv: string[], cwd: string): Promise<C
 }
 
 if (import.meta.main) {
-  const outcome = await runClassifyRiskCli(process.argv.slice(2), process.cwd());
-  if (outcome.stderr) console.error(outcome.stderr);
-  if (outcome.stdout) console.log(outcome.stdout);
-  process.exit(outcome.exitCode);
+  emitOutcome(await runClassifyRiskCli(process.argv.slice(2), process.cwd()));
 }

@@ -37,7 +37,7 @@
  *   then run it — which needs no bypass at all.
  */
 
-import { announceBypass, announceFailOpen, block, bypassReason, commandOf, readStdinJson } from './lib/shared.ts';
+import { announceBypass, bashCall, block, bypassReason, runHook } from './lib/shared.ts';
 
 const SLUG = 'egress';
 
@@ -86,10 +86,9 @@ export function evaluateEgress(cmd: string): EgressVerdict {
  *  the same test-only seam readStdinJson itself exposes. Every production
  *  call site (below) omits it. */
 export function main(raw?: string): void {
-  const input = readStdinJson(raw);
-  if (!input || input.tool_name !== 'Bash') return;
-  const cmd = commandOf(input);
-  if (!cmd) return;
+  const call = bashCall(raw);
+  if (!call) return;
+  const { cmd } = call;
 
   const verdict = evaluateEgress(cmd);
   if (verdict.action === 'allow') return;
@@ -130,13 +129,5 @@ export function main(raw?: string): void {
   }
 }
 
-if (import.meta.main) {
-  try {
-    main();
-  } catch (e) {
-    // Fail-open on our OWN bugs; block() exits before reaching here. Said out
-    // loud, because a guard that has been crashing silently is not a guard.
-    announceFailOpen(SLUG, e);
-  }
-  process.exit(0);
-}
+// Fail-open on our OWN bugs; block() exits before reaching here.
+if (import.meta.main) runHook(SLUG, main);

@@ -15,8 +15,11 @@
  */
 
 import { extname } from "path";
-import { execFileSync } from "child_process";
+import { emitOutcome, flagValue, type CliOutcome } from "./Cli.ts";
+import { numstatTotals } from "./GitDiff.ts";
 import { loadLightPathConfig, type LightPathConfig } from "./Config.ts";
+
+export type { CliOutcome };
 
 export type Verdict = "light" | "full";
 export interface Classification {
@@ -72,37 +75,17 @@ export interface DiffStat {
  * failure (missing base ref, not a repo) — callers fail closed.
  */
 export function getDiffFiles(cwd: string, base = "origin/main"): DiffStat {
-  // --no-renames so a rename lands as delete(old)+add(new) on clean single-path
-  // lines: a `git mv code.ts doc.md` then shows `code.ts` (→ full), never the
-  // ambiguous `code.ts => doc.md` numstat line whose extname would read `.md`.
-  const out = execFileSync("git", ["diff", "--numstat", "--no-renames", `${base}...HEAD`], {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const files: string[] = [];
-  let addedLoc = 0;
-  for (const line of out.split("\n")) {
-    if (!line.trim()) continue;
-    const [added, _removed, ...pathParts] = line.split("\t");
-    const path = pathParts.join("\t");
-    if (!path) continue;
-    files.push(path);
-    const n = Number.parseInt(added ?? "", 10);
-    if (Number.isFinite(n)) addedLoc += n; // binary "-" → NaN → skipped (0)
-  }
+  // --no-renames: a rename must land as delete(old)+add(new) on clean
+  // single-path lines, or `git mv code.ts doc.md` reaches classifyDiff as the
+  // path `code.ts => doc.md`, whose extname reads `.md` — a code change waved
+  // through as docs. See GitDiff.ts for the rest of the flag rationale.
+  const { files, addedLoc } = numstatTotals(cwd, base, { noRenames: true });
   return { files, addedLoc };
 }
 
 // ── CLI ──
 // stdout: "light" | "full"   (bare, for shell gating)
 // stderr: reason             (audit)
-
-export interface CliOutcome {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
 
 /**
  * CLI body, returning what it would print rather than printing it. Extracted so
@@ -125,8 +108,7 @@ export function runClassifyCli(
       exitCode: 1,
     };
   }
-  const baseIdx = argv.indexOf("--base");
-  const base = baseIdx >= 0 ? argv[baseIdx + 1] : "origin/main";
+  const base = flagValue(argv, "--base", "origin/main");
   const asJson = argv.includes("--json");
   try {
     const { files, addedLoc } = getDiffFiles(cwd, base);
@@ -142,8 +124,5 @@ export function runClassifyCli(
 }
 
 if (import.meta.main) {
-  const outcome = runClassifyCli(process.argv.slice(2), process.cwd(), loadLightPathConfig);
-  if (outcome.stderr) console.error(outcome.stderr);
-  if (outcome.stdout) console.log(outcome.stdout);
-  process.exit(outcome.exitCode);
+  emitOutcome(runClassifyCli(process.argv.slice(2), process.cwd(), loadLightPathConfig));
 }

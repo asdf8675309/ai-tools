@@ -32,8 +32,9 @@
  */
 
 import { readFileSync } from "fs";
-import { execFileSync } from "child_process";
 import { join } from "path";
+import { flagValue } from "./Cli.ts";
+import { changedFiles, unifiedDiff } from "./GitDiff.ts";
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -263,18 +264,12 @@ export async function generatePacket(opts: {
   const sinceRef = opts.sinceRef ?? "origin/main";
   const cwd = opts.cwd ?? process.cwd();
 
-  // --end-of-options (git ≥2.24) so a `-`-prefixed ref can never be parsed as a
-  // flag. A bare `--` only separates pathspecs, not revisions.
-  const changedFiles = execFileSync("git", ["diff", "--name-only", "--end-of-options", `${sinceRef}...HEAD`], {
-    cwd, encoding: "utf8",
-  })
-    .split("\n")
-    .filter((f) => f && /\.(ts|tsx|js|jsx|py|go|rs)$/.test(f));
+  const sourceFiles = changedFiles(cwd, sinceRef).filter((f) => /\.(ts|tsx|js|jsx|py|go|rs)$/.test(f));
 
   const packetFiles: PacketFile[] = [];
   let totalRedactions = 0;
 
-  for (const file of changedFiles) {
+  for (const file of sourceFiles) {
     let source: string;
     try {
       source = readFileSync(join(cwd, file), "utf8");
@@ -294,7 +289,7 @@ export async function generatePacket(opts: {
     });
   }
 
-  const fullDiff = execFileSync("git", ["diff", "--end-of-options", `${sinceRef}...HEAD`], { cwd, encoding: "utf8" });
+  const fullDiff = unifiedDiff(cwd, sinceRef);
   const { text: redactedDiff } = redactSecrets(fullDiff);
   const diff_chunks = chunkDiff(redactedDiff);
 
@@ -368,8 +363,7 @@ if (import.meta.main) {
     console.log("Usage: bun ReviewPacketGenerator.ts [--since <ref>] [--json]");
     process.exit(0);
   }
-  const sinceIdx = args.indexOf("--since");
-  const since = sinceIdx >= 0 ? args[sinceIdx + 1] : "origin/main";
+  const since = flagValue(args, "--since", "origin/main");
   const asJson = args.includes("--json");
 
   const packet = await generatePacket({ sinceRef: since });

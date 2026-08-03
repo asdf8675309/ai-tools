@@ -26,7 +26,8 @@
  *   bun tools/RemovalTrackingGate.ts --since origin/main --pr 145
  */
 
-import { execFileSync } from "child_process";
+import { flagValue } from "./Cli.ts";
+import { numstatTotals, unifiedDiff } from "./GitDiff.ts";
 import { loadConfig } from "./Config.ts";
 import type { AgentAuthor } from "./PRAuthorClassifier.ts";
 
@@ -68,28 +69,13 @@ export function computeRemovalRatio(opts: {
   const since = opts.sinceRef ?? "origin/main";
   const cwd = opts.cwd ?? process.cwd();
 
-  // --end-of-options (git ≥2.24) so a `-`-prefixed ref can never be parsed as a
-  // flag. A bare `--` only separates pathspecs, not revisions. The array form
-  // above stops a shell from seeing the ref; this stops git from doing so.
-  const numstat = execFileSync("git", ["diff", "--numstat", "--end-of-options", `${since}...HEAD`], {
-    cwd, encoding: "utf8",
-  }).trim();
+  // Renames are NOT split here (unlike the classifiers): a rename genuinely
+  // removes as much as it adds, and splitting it would inflate the additive
+  // signal this gate exists to measure.
+  const { files, addedLoc: added_loc, removedLoc: removed_loc } = numstatTotals(cwd, since);
+  const files_changed = files.length;
 
-  let added_loc = 0;
-  let removed_loc = 0;
-  let files_changed = 0;
-  for (const line of numstat.split("\n")) {
-    if (!line.trim()) continue;
-    const cols = line.split("\t");
-    const a = cols[0] ?? "";
-    const r = cols[1] ?? "";
-    // Binary files report "-" instead of a count
-    if (a !== "-") added_loc += parseInt(a, 10) || 0;
-    if (r !== "-") removed_loc += parseInt(r, 10) || 0;
-    files_changed++;
-  }
-
-  const fullDiff = execFileSync("git", ["diff", "--end-of-options", `${since}...HEAD`], { cwd, encoding: "utf8" });
+  const fullDiff = unifiedDiff(cwd, since);
   const added_multiline_strings = countMultilineStringsInHunk(fullDiff, "+");
   const removed_multiline_strings = countMultilineStringsInHunk(fullDiff, "-");
 
@@ -192,8 +178,7 @@ if (import.meta.main) {
     console.log("Usage: bun RemovalTrackingGate.ts [--since <ref>] [--pr <N>]");
     process.exit(0);
   }
-  const sinceIdx = args.indexOf("--since");
-  const since = sinceIdx >= 0 ? args[sinceIdx + 1] : "origin/main";
+  const since = flagValue(args, "--since", "origin/main");
   const prIdx = args.indexOf("--pr");
   const prArg = prIdx >= 0 ? args[prIdx + 1] : undefined;
 

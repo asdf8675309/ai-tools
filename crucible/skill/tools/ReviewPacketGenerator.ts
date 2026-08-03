@@ -273,8 +273,18 @@ export async function generatePacket(opts: {
     let source: string;
     try {
       source = readFileSync(join(cwd, file), "utf8");
-    } catch {
-      continue; // deleted file
+    } catch (err) {
+      // A missing file IS the expected case: the diff lists deletions too.
+      // Anything else (EACCES, EISDIR, an I/O error) is a changed file that
+      // silently never reached the packet — a reviewer reads the packet as the
+      // full change set, so a file dropped without a word reads as a file
+      // nobody needed to look at.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(
+          `[crucible review-packet] skipping ${file}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      continue;
     }
     const language = detectLanguage(file);
     const { text: redactedSource, count: rcount } = redactSecrets(source);

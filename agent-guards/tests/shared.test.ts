@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   announceBypass,
+  announceFailOpen,
   bypassReason,
   commandOf,
   envVarFor,
@@ -28,6 +29,7 @@ import {
   safeName,
   shellSegments,
   stateDir,
+  runHook,
   stripQuoted,
   tokenFor,
   UNTRUSTED_CLOSE,
@@ -35,6 +37,7 @@ import {
   wrapUntrusted,
   writeState,
 } from '../hooks/lib/shared.ts';
+import { withExitSpy } from './lib/exit-spy.ts';
 
 // ── readStdinJson — the fail-open primitive every guard's main() calls first ─
 
@@ -197,6 +200,93 @@ describe('announceBypass', () => {
       '[agent-guards/egress] BYPASSED via AGENT_GUARDS_EGRESS=0 — would have blocked: a credential in an outbound command\n',
     );
   });
+});
+
+// ── announceFailOpen — the "this guard crashed and allowed" line ──────────
+//
+// Every guard's top-level catch calls this. Without it a guard that throws on
+// every invocation is indistinguishable from one finding nothing to block — the
+// exact failure this whole suite exists to make impossible.
+
+function captureStderr(fn: () => void): string {
+  const original = process.stderr.write.bind(process.stderr);
+  let captured = '';
+  process.stderr.write = (chunk: string) => {
+    captured += chunk;
+    return true;
+  };
+  try {
+    fn();
+  } finally {
+    process.stderr.write = original;
+  }
+  return captured;
+}
+
+describe('announceFailOpen', () => {
+  test('names the guard, says the guard did not run, and includes the error', () => {
+    const captured = captureStderr(() => announceFailOpen('egress', new Error('boom')));
+    expect(captured).toStartWith('[agent-guards/egress] INTERNAL ERROR — guard did not run, allowing: ');
+    expect(captured).toContain('boom');
+    expect(captured).toEndWith('\n');
+  });
+
+  test('reports a non-Error throw rather than printing [object Object]', () => {
+    expect(captureStderr(() => announceFailOpen('leaks', 'a bare string'))).toContain('a bare string');
+  });
+
+  test('never throws itself — it runs inside the catch that is already handling a failure', () => {
+    expect(() => captureStderr(() => announceFailOpen('loops', undefined))).not.toThrow();
+  });
+
+  test('records the fail-open in AGENT_GUARDS_LOG when logging is enabled', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guards-failopen-'));
+    const logPath = join(dir, 'guards.jsonl');
+    process.env.AGENT_GUARDS_LOG = logPath;
+    try {
+      captureStderr(() => announceFailOpen('task-flood', new Error('kaboom')));
+      const entry = JSON.parse(readFileSync(logPath, 'utf8').trim());
+      expect(entry.guard).toBe('task-flood');
+      expect(entry.action).toBe('fail-open');
+      expect(entry.error).toContain('kaboom');
+    } finally {
+      delete process.env.AGENT_GUARDS_LOG;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── runHook — the epilogue every guard's import.meta.main block delegates to ─
+//
+// This helper is where two changes meet: one collapsed nine copies of the
+// top-level try/catch into a single function, the other made that catch stop
+// being silent. Resolved carelessly, the collapse silently wins and every guard
+// goes back to failing open without a word — with the whole suite still green,
+// because nothing else asserts the announcement. These tests are that assertion.
+
+describe('runHook', () => {
+  test('a throwing main still exits 0 — a crashing guard must not become a blocking one', () => {
+    const result = withExitSpy(() => runHook('egress', () => { throw new Error('guard bug'); }));
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('and says so, naming the guard it was given', () => {
+    const result = withExitSpy(() => runHook('egress', () => { throw new Error('guard bug'); }));
+    expect(result.stderr).toContain('[agent-guards/egress] INTERNAL ERROR — guard did not run, allowing: ');
+    expect(result.stderr).toContain('guard bug');
+  });
+
+  test('a clean main exits 0 and says nothing', () => {
+    const result = withExitSpy(() => runHook('egress', () => {}));
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  // The "a deliberate block() is not swallowed" half of runHook's contract is
+  // NOT assertable here, for the reason this file's header gives: withExitSpy
+  // turns process.exit(2) into a throw, which runHook's catch then sees and
+  // reports as a guard bug — the opposite of what a real exit does. It is
+  // covered where the real exit code is observable, in tests/guards.test.ts.
 });
 
 // ── injectContext — the non-blocking wire format ─────────────────────────

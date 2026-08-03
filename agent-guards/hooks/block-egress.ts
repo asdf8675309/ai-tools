@@ -130,4 +130,4 @@ export function main(raw?: string): void {
 }
 
 // Fail-open on our OWN bugs; block() exits before reaching here.
-if (import.meta.main) runHook(main);
+if (import.meta.main) runHook(SLUG, main);

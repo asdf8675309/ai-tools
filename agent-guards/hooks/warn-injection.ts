@@ -139,4 +139,4 @@ export function main(raw?: string): void {
 }
 
 // Fail-open. This hook can only ever add context; a bug must not cost more.
-if (import.meta.main) runHook(main);
+if (import.meta.main) runHook('injection', main);

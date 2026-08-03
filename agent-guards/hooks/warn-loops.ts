@@ -182,4 +182,4 @@ export function main(raw?: string): void {
 }
 
 // Fail-open. The worst case of a bug here is a missing hint.
-if (import.meta.main) runHook(main);
+if (import.meta.main) runHook('loops', main);

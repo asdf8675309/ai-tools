@@ -115,4 +115,4 @@ export function main(raw?: string): void {
 }
 
 // Fail-open. Never let this hook stand between a user and their prompt.
-if (import.meta.main) runHook(main);
+if (import.meta.main) runHook('repeat', main);

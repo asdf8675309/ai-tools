@@ -150,20 +150,47 @@ export function block(slug: string, lines: string[]): never {
 }
 
 /**
- * Run a guard's `main` as a hook process: fail open on our OWN bugs, then exit
- * 0. Every guard's `import.meta.main` block was this same try/catch, and the
- * catch is the load-bearing part — a guard that throws must not become a guard
- * that blocks. A deliberate `block()` calls process.exit before reaching here,
- * so this can never swallow one.
+ * Report a fail-open: the guard hit a bug in its OWN logic and allowed.
+ *
+ * Fail-open is the right behaviour — a crash in here must never wedge a shell
+ * or a session. Being SILENT about it is not: a guard that has been throwing on
+ * every invocation for a month is indistinguishable from one that was never
+ * installed, and both read as "nothing to block". Same rule as a bypass, for
+ * the same reason: stderr, every time, naming the guard and the error.
+ *
+ * Stack, not just message — the point of the line is to be actionable, and
+ * `undefined is not an object` with no frame is not.
+ */
+export function announceFailOpen(slug: string, e: unknown): void {
+  const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+  process.stderr.write(
+    `[agent-guards/${slug}] INTERNAL ERROR — guard did not run, allowing: ${detail}\n`,
+  );
+  log({ guard: slug, action: 'fail-open', error: detail });
+}
+
+/**
+ * Run a guard's `main` as a hook process: fail open on our OWN bugs, announce
+ * it, then exit 0. Every guard's `import.meta.main` block was this same
+ * try/catch, and the catch is the load-bearing part — a guard that throws must
+ * not become a guard that blocks. A deliberate `block()` calls process.exit
+ * before reaching here, so this can never swallow one.
+ *
+ * The `slug` is required rather than optional precisely because this function
+ * is the merge point of two changes that pull in opposite directions: one
+ * collapsed nine copies of this try/catch into a single helper, the other made
+ * that same catch stop being silent. A no-arg `runHook(main)` would type-check
+ * with an empty catch and quietly undo the second — so the signature makes the
+ * announcement impossible to drop by accident.
  *
  * Each call site keeps its own one-line note on what failing open costs there;
  * the mechanism is the same everywhere.
  */
-export function runHook(main: () => void): never {
+export function runHook(slug: string, main: () => void): never {
   try {
     main();
-  } catch {
-    // Intentionally empty — see above.
+  } catch (e) {
+    announceFailOpen(slug, e);
   }
   process.exit(0);
 }

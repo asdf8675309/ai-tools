@@ -315,4 +315,4 @@ export function main(raw?: string): void {
 }
 
 // Fail-open: a Stop hook must never be why a session cannot end.
-if (import.meta.main) runHook(main);
+if (import.meta.main) runHook(SLUG, main);

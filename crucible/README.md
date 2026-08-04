@@ -140,6 +140,24 @@ Use the skill before you open a PR; use the Action to catch what reaches the PR 
 
 **What the clamp does not do is stop an overlay weakening the review it configures.** The protected list is about where a review's output and credentials can be sent, not about how hard it looks. A `.crucible.yaml` can still raise `thresholds.large_pr_block_loc` past the size of its own diff or set `flags.cross_vendor_disprove: false`, and each of those merges by design, because they are the knobs the overlay exists to provide. Read a `.crucible.yaml` in a PR the way you would read a change to the CI config: it is part of the diff under review, and it is the part that decides how the rest gets reviewed.
 
+A whole overlay, showing what is left once the clamp is applied. `.crucible.yaml` is gitignored here, and leaving it untracked is what keeps `models` available:
+
+```yaml
+thresholds:
+  confidence_floor: 85
+flags:
+  fail_on_revert_gate: true
+risk_tiers:
+  sensitive_paths:            # unions with the hardcoded baseline, never replaces it
+    - '(^|/)crucible/skill/tools/Config\.ts$'
+light_path:
+  max_loc: 500                # narrowing only
+# models:                     # untracked overlays only; delete the file after an eval run
+#   reviewer_security: claude-opus
+```
+
+`skill/config.example.yaml` is the companion for the *other* file — the skill's own `config.yaml`, which is yours and is not clamped. Most of what it documents cannot appear in an overlay at all, so do not copy from it into a repo root.
+
 Worth knowing:
 
 - **`thresholds.confidence_floor`** (80) — how sure the disprove pass must be to let a finding through.

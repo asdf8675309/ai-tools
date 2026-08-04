@@ -30,6 +30,11 @@ temp/
 # Local index / per-repo state
 .codegraph/
 .crucible/
+
+# A project overlay is per-machine, and staying untracked is what lets it set
+# `models` for an eval run — Crucible clamps that field out of any overlay the
+# reviewed repo tracks. Committing one also puts it in the diff under review.
+.crucible.yaml
 crucible/node_modules/
 agent-guards/node_modules/
 pr-babysit/node_modules/

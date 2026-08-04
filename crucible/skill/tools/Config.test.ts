@@ -341,19 +341,55 @@ describe("overlayIsTracked", () => {
     expect(overlayIsTracked(dir, join(dir, ".crucible.yaml"))).toBe(true);
   });
 
+  // A real hang needs a fake `git`, which Bun's PATH resolution defeats — so the
+  // option's presence is asserted against source. Comments are stripped first:
+  // grepping raw text for "timeout:" passes on a comment saying so.
   test("the subprocess is bounded rather than trusted to return", () => {
     expect(GIT_PROVENANCE_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(GIT_PROVENANCE_TIMEOUT_MS).toBeLessThanOrEqual(30_000);
+
     const src = readFileSync(join(import.meta.dir, "Config.ts"), "utf8");
-    const call = src.slice(src.indexOf('execFileSync("git"'));
-    expect(call.slice(0, call.indexOf("});"))).toContain("timeout:");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const call = code.slice(code.indexOf('execFileSync("git"'));
+    expect(call.slice(0, call.indexOf("});"))).toMatch(/timeout\s*:\s*GIT_PROVENANCE_TIMEOUT_MS/);
+  });
+
+  test("says so when git could not answer, instead of reporting a check it never got", () => {
+    const dir = scratch(); // not a git repo — git exits 128, provenance unknown
+    const seen: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void seen.push(a.join(" "));
+    try {
+      expect(overlayIsTracked(dir, join(dir, ".crucible.yaml"))).toBe(true);
+    } finally {
+      console.error = orig;
+    }
+    const said = seen.join("\n");
+    expect(said).toContain("could not determine");
+    expect(said).toContain("assuming tracked");
+  });
+
+  test("stays quiet when git actually answers", () => {
+    for (const track of [true, false]) {
+      const dir = scratch();
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      if (track) execFileSync("git", ["add", ".crucible.yaml"], { cwd: dir });
+      const seen: string[] = [];
+      const orig = console.error;
+      console.error = (...a: unknown[]) => void seen.push(a.join(" "));
+      try {
+        expect(overlayIsTracked(dir, join(dir, ".crucible.yaml"))).toBe(track);
+      } finally {
+        console.error = orig;
+      }
+      expect(seen.join("\n")).not.toContain("could not determine");
+    }
   });
 });
 
-// Exit 1 is the ONLY reading that unlocks `models`. Everything else — a tree that
-// is not a repo, no git installed, a kill after the timeout — has to clamp. These
-// go through the pure predicate: a fake `git` on PATH does not survive executable
-// resolution under Bun, so provoking ENOENT or a hang through the real subprocess
-// silently re-runs the not-a-repo case instead.
+// Through the pure predicate, not the subprocess: a fake `git` on PATH does not
+// survive Bun's executable resolution, so ENOENT and timeout cannot be provoked
+// for real — the attempt silently re-runs the not-a-repo case instead.
 describe("trackedFromGitFailure", () => {
   test("exit 1 — git says the path is not in the index — is the one untracked reading", () => {
     expect(trackedFromGitFailure({ status: 1 })).toBe(false);

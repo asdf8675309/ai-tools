@@ -31,7 +31,11 @@
 // secrets in public output.
 export function scrubSecrets(s: string): string {
   return s
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]")
+    // RFC 6750 §2.1 b64token charset (ALPHA / DIGIT / "-" / "." / "_" / "~" /
+    // "+" / "/", optionally "="-padded) — the prior [A-Za-z0-9._-]+ stopped at
+    // the first "+", "/", or "=", leaving the rest of a base64-shaped bearer
+    // token exposed in public output.
+    .replace(/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [REDACTED]")
     // Known secret prefixes — redact regardless of shape characteristics.
     .replace(/\b(ghp_|gho_|ghu_|ghs_|ghr_|sk-ant-|sk-|sk_|cf_|xoxb-|xoxp-)[A-Za-z0-9_-]+/g, "[REDACTED-PREFIXED-TOKEN]")
     // Tightened generic heuristic: ≥48 chars, mixed case, at least one digit.

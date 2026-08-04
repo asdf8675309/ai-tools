@@ -371,6 +371,16 @@ export const OVERLAY_PROTECTED_PATHS: readonly string[] = [
   "integrations.metis.network",
   "integrations.metis.llm.base_url_env",
   "integrations.metis.llm.api_key_env",
+  // `gateway_model_map` doesn't reach a new endpoint (base_url/api_key_env
+  // above stay protected) but it does rename which model answers at the
+  // already-trusted gateway — an overlay could still point reviewer_security
+  // at a weaker model. `models` and `reviewer_fallback_chain` are the same
+  // redirection one layer up: which provider-key a role resolves to. All
+  // three tune WHICH reviewer looks, not just how loudly — that's a review
+  // redirection, not a narrowing.
+  "gateway_model_map",
+  "models",
+  "reviewer_fallback_chain",
 ];
 
 function deleteAtPath(root: Record<string, unknown>, path: string): boolean {

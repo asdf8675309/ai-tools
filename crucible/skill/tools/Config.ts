@@ -27,6 +27,7 @@
  *   bun tools/Config.ts thresholds | flags | light-path | risk-tiers | fallback-chain
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
@@ -36,6 +37,9 @@ const parseYaml = (text: string): unknown => Bun.YAML.parse(text);
 
 const SKILL_CONFIG_PATH = join(import.meta.dir, "..", "config.yaml");
 const PROJECT_OVERRIDE_FILENAME = ".crucible.yaml";
+
+/** Index lookup on any sane repo is milliseconds; this only bounds a pathology. */
+export const GIT_PROVENANCE_TIMEOUT_MS = 5_000;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -371,17 +375,58 @@ export const OVERLAY_PROTECTED_PATHS: readonly string[] = [
   "integrations.metis.network",
   "integrations.metis.llm.base_url_env",
   "integrations.metis.llm.api_key_env",
-  // `gateway_model_map` doesn't reach a new endpoint (base_url/api_key_env
-  // above stay protected) but it does rename which model answers at the
-  // already-trusted gateway — an overlay could still point reviewer_security
-  // at a weaker model. `models` and `reviewer_fallback_chain` are the same
-  // redirection one layer up: which provider-key a role resolves to. All
-  // three tune WHICH reviewer looks, not just how loudly — that's a review
-  // redirection, not a narrowing.
+  // Same class as the maps above: a target, not a knob. The chain is what
+  // guarantees a role ends at a `claude-*` key.
   "gateway_model_map",
-  "models",
   "reviewer_fallback_chain",
 ];
+
+/**
+ * Paths an overlay may set only when the reviewed repo does NOT track it.
+ *
+ * A tracked `.crucible.yaml` arrived with the diff and could aim
+ * `models.reviewer_security` at the weakest key you trust; an untracked one is
+ * the eval-run override FullReview.md documents. Same path, so git decides.
+ */
+export const OVERLAY_TRACKED_ONLY_PROTECTED_PATHS: readonly string[] = ["models"];
+
+/**
+ * Only exit 1 ("not in the index") means untracked. Every other failure leaves
+ * the question unanswered, and an unanswered question clamps.
+ *
+ * Split out from the subprocess so the ENOENT and timeout cases are testable —
+ * a faked PATH does not survive Bun's executable resolution.
+ */
+export function trackedFromGitFailure(err: unknown): boolean {
+  return (err as { status?: number } | null)?.status !== 1;
+}
+
+/**
+ * Whether the reviewed tree carries `.crucible.yaml`. Fails closed, and bounded
+ * because every loadConfig() caller waits on it.
+ */
+export function overlayIsTracked(cwd: string, overlayPath: string): boolean {
+  try {
+    execFileSync("git", ["ls-files", "--error-unmatch", "--end-of-options", overlayPath], {
+      cwd,
+      stdio: "ignore",
+      timeout: GIT_PROVENANCE_TIMEOUT_MS,
+    });
+    return true; // exit 0 — the reviewed branch carries this file
+  } catch (e) {
+    const tracked = trackedFromGitFailure(e);
+    // Same return value as a real "tracked", so say which one it was.
+    if (tracked) {
+      const err = e as { status?: number; code?: string; signal?: string } | null;
+      const cause = err?.code ?? (err?.signal ? `killed by ${err.signal}` : `exit ${err?.status ?? "unknown"}`);
+      console.error(
+        `⚠ Crucible: could not determine whether ${basename(overlayPath)} is tracked (git ${cause}) — ` +
+          `assuming tracked, so \`models\` is clamped. Fix git here if you meant to override it for an eval run.`,
+      );
+    }
+    return tracked;
+  }
+}
 
 function deleteAtPath(root: Record<string, unknown>, path: string): boolean {
   const parts = path.split(".");
@@ -403,13 +448,24 @@ function deleteAtPath(root: Record<string, unknown>, path: string): boolean {
  * surviving overlay and every dropped path so the caller can say so out loud.
  * Non-object input passes through as an empty overlay — merging it would replace
  * the whole config. Pure apart from cloning its input.
+ *
+ * `overlayTracked` defaults to true, so a caller who never established provenance
+ * gets the clamped reading.
  */
-export function hardenProjectOverlay(overlay: unknown): { overlay: unknown; dropped: string[] } {
+export function hardenProjectOverlay(
+  overlay: unknown,
+  opts: { overlayTracked?: boolean } = {},
+): { overlay: unknown; dropped: string[] } {
   if (!isPlainObject(overlay)) return { overlay: {}, dropped: [] };
   const clone = structuredClone(overlay) as Record<string, unknown>;
   const dropped: string[] = [];
+  const tracked = opts.overlayTracked ?? true;
 
-  for (const path of OVERLAY_PROTECTED_PATHS) {
+  const protectedPaths = tracked
+    ? [...OVERLAY_PROTECTED_PATHS, ...OVERLAY_TRACKED_ONLY_PROTECTED_PATHS]
+    : OVERLAY_PROTECTED_PATHS;
+
+  for (const path of protectedPaths) {
     if (deleteAtPath(clone, path)) dropped.push(path);
   }
 
@@ -451,12 +507,24 @@ export function loadConfig(): CrucibleConfig {
   const overlayPath = join(cwd, PROJECT_OVERRIDE_FILENAME);
   if (existsSync(overlayPath)) {
     try {
-      const { overlay, dropped } = hardenProjectOverlay(parseYaml(readFileSync(overlayPath, "utf8")));
+      const overlayTracked = overlayIsTracked(cwd, overlayPath);
+      const { overlay, dropped } = hardenProjectOverlay(parseYaml(readFileSync(overlayPath, "utf8")), {
+        overlayTracked,
+      });
       if (dropped.length > 0) {
         console.error(
           `⚠ Crucible: ignored ${dropped.length} protected field(s) in ${overlayPath} — ` +
             `a working-tree overlay cannot name an execution target, an endpoint, or a credential ` +
             `env var, nor enable an integration: ${dropped.join(", ")}`,
+        );
+      }
+      // "treated as", not "is": overlayIsTracked also lands here when git could
+      // not answer. Silence would read as "my eval override didn't work".
+      if (overlayTracked && dropped.includes("models")) {
+        console.error(
+          `  └ \`models\` was dropped because ${PROJECT_OVERRIDE_FILENAME} is treated as tracked in this repository. ` +
+            `An overlay that arrives with the code under review cannot choose its own reviewers. ` +
+            `For an eval run, use an untracked ${PROJECT_OVERRIDE_FILENAME}, or edit the skill's own config.yaml.`,
         );
       }
       cfg = mergeConfig(cfg, overlay);

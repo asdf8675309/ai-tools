@@ -30,6 +30,7 @@ temp/
 # Local index / per-repo state
 .codegraph/
 .crucible/
+.crucible.yaml
 crucible/node_modules/
 agent-guards/node_modules/
 pr-babysit/node_modules/

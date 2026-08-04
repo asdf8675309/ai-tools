@@ -21,9 +21,12 @@
 # resolved from the current working directory and deep-merged over this file,
 # so you can retune Crucible per repo without forking the skill. That file
 # lives in the tree under review, so it is clamped: it can turn an integration
-# off and retune thresholds, flags and model slots, but it cannot turn one on
-# or name a command, endpoint or credential env var. Dropped fields are
-# reported on stderr. See OVERLAY_PROTECTED_PATHS in tools/Config.ts.
+# off and retune thresholds and flags, but it cannot turn one on or name a
+# command, endpoint or credential env var. `models` depends on where the file
+# came from — an overlay git tracks in the repo under review cannot pick its own
+# reviewers, while one you dropped in yourself can, which is what makes the
+# eval-run recipe in workflows/FullReview.md work. Dropped fields are reported
+# on stderr. See OVERLAY_PROTECTED_PATHS in tools/Config.ts.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reviewer model assignment

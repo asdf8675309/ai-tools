@@ -1,8 +1,13 @@
 import { test, expect, describe, afterEach } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  GIT_PROVENANCE_TIMEOUT_MS,
+  OVERLAY_TRACKED_ONLY_PROTECTED_PATHS,
+  overlayIsTracked,
+  trackedFromGitFailure,
   DEFAULT_CONFIG,
   DEFAULT_LIGHT_PATH,
   DEFAULT_RISK_TIERS,
@@ -250,6 +255,154 @@ describe("hardenProjectOverlay", () => {
     const input = { external_cli_map: { "cli-x": { command: "sh" } } };
     hardenProjectOverlay(input);
     expect(input.external_cli_map["cli-x"]).toEqual({ command: "sh" });
+  });
+
+  test("omitting provenance clamps `models` — the default is the strict reading", () => {
+    const { overlay, dropped } = hardenProjectOverlay({ models: { reviewer_security: "claude-haiku" } });
+    expect(dropped).toContain("models");
+    expect(overlay).toEqual({});
+  });
+
+  test("a tracked overlay cannot choose its own reviewers", () => {
+    const { overlay, dropped } = hardenProjectOverlay(
+      { models: { reviewer_security: "claude-haiku" }, thresholds: { confidence_floor: 60 } },
+      { overlayTracked: true },
+    );
+    expect(dropped).toContain("models");
+    expect(overlay).toEqual({ thresholds: { confidence_floor: 60 } });
+  });
+
+  test("an untracked overlay keeps `models` — the documented eval-override route", () => {
+    const { overlay, dropped } = hardenProjectOverlay(
+      { models: { reviewer_security: "claude-haiku" } },
+      { overlayTracked: false },
+    );
+    expect(dropped).not.toContain("models");
+    expect(overlay).toEqual({ models: { reviewer_security: "claude-haiku" } });
+  });
+
+  test("untracked buys `models` and nothing else — the maps stay clamped either way", () => {
+    const attempt = {
+      models: { reviewer_security: "gateway-cheap" },
+      gateway_model_map: { "gateway-cheap": "vendor/weak" },
+      reviewer_fallback_chain: ["gateway-cheap"],
+      external_cli_map: { "cli-x": { command: "sh" } },
+      integrations: { gateway: { base_url: "https://attacker.example" } },
+    };
+    const { overlay, dropped } = hardenProjectOverlay(attempt, { overlayTracked: false });
+    expect(dropped.sort()).toEqual([
+      "external_cli_map",
+      "gateway_model_map",
+      "integrations.gateway.base_url",
+      "reviewer_fallback_chain",
+    ]);
+    // The surviving key names a gateway provider-key that no map now defines, so it
+    // falls down the chain to Claude rather than reaching anything the overlay chose.
+    expect(overlay).toEqual({ models: { reviewer_security: "gateway-cheap" }, integrations: { gateway: {} } });
+  });
+
+  test("the tracked-only list is exactly `models`", () => {
+    expect([...OVERLAY_TRACKED_ONLY_PROTECTED_PATHS]).toEqual(["models"]);
+  });
+});
+
+// ── Overlay provenance (git) ────────────────────────────────────────────────
+
+describe("overlayIsTracked", () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  const scratch = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "crucible-prov-"));
+    dirs.push(dir);
+    writeFileSync(join(dir, ".crucible.yaml"), "thresholds: {confidence_floor: 60}\n");
+    return dir;
+  };
+
+  test("a file the reviewed branch carries reads as tracked", () => {
+    const dir = scratch();
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["add", ".crucible.yaml"], { cwd: dir });
+    expect(overlayIsTracked(dir, join(dir, ".crucible.yaml"))).toBe(true);
+  });
+
+  test("a file you dropped in yourself reads as untracked", () => {
+    const dir = scratch();
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    expect(overlayIsTracked(dir, join(dir, ".crucible.yaml"))).toBe(false);
+  });
+
+  test("fails closed when the question cannot be answered: not a repo", () => {
+    const dir = scratch();
+    expect(overlayIsTracked(dir, join(dir, ".crucible.yaml"))).toBe(true);
+  });
+
+  test("the subprocess is bounded rather than trusted to return", () => {
+    expect(GIT_PROVENANCE_TIMEOUT_MS).toBeGreaterThan(0);
+    const src = readFileSync(join(import.meta.dir, "Config.ts"), "utf8");
+    const call = src.slice(src.indexOf('execFileSync("git"'));
+    expect(call.slice(0, call.indexOf("});"))).toContain("timeout:");
+  });
+});
+
+// Exit 1 is the ONLY reading that unlocks `models`. Everything else — a tree that
+// is not a repo, no git installed, a kill after the timeout — has to clamp. These
+// go through the pure predicate: a fake `git` on PATH does not survive executable
+// resolution under Bun, so provoking ENOENT or a hang through the real subprocess
+// silently re-runs the not-a-repo case instead.
+describe("trackedFromGitFailure", () => {
+  test("exit 1 — git says the path is not in the index — is the one untracked reading", () => {
+    expect(trackedFromGitFailure({ status: 1 })).toBe(false);
+  });
+
+  test.each([
+    ["not a git repository", { status: 128 }],
+    ["git missing from PATH", { status: undefined, code: "ENOENT" }],
+    ["killed by the timeout", { status: null, signal: "SIGTERM" }],
+    ["some future git exit code", { status: 42 }],
+    ["an error carrying no status at all", {}],
+    ["not an object", null],
+  ])("fails closed: %s", (_label, err) => {
+    expect(trackedFromGitFailure(err)).toBe(true);
+  });
+});
+
+// ── Overlay provenance, end to end through loadConfig ───────────────────────
+
+describe("loadConfig honours overlay provenance", () => {
+  const origCwd = process.cwd();
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    _resetCache();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  const repoWithOverlay = (opts: { track: boolean }): string => {
+    const dir = mkdtempSync(join(tmpdir(), "crucible-e2e-"));
+    dirs.push(dir);
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, ".crucible.yaml"), "models:\n  reviewer_security: claude-haiku\n");
+    if (opts.track) execFileSync("git", ["add", ".crucible.yaml"], { cwd: dir });
+    process.chdir(dir);
+    _resetCache();
+    return dir;
+  };
+
+  test("an untracked overlay actually repoints the security reviewer", () => {
+    repoWithOverlay({ track: false });
+    expect(resolveReviewer("security", loadConfig()).provider_key).toBe("claude-haiku");
+  });
+
+  test("a tracked overlay leaves the security reviewer on the skill default", () => {
+    repoWithOverlay({ track: true });
+    expect(resolveReviewer("security", loadConfig()).provider_key).toBe("claude-sonnet");
   });
 });
 

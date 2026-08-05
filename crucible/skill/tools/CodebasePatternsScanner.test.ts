@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectUnits, detectPatterns, walkFiles, renderMarkdown, scanUnit, type Pattern } from "./CodebasePatternsScanner.ts";
+import { detectUnits, detectPatterns, isEvidenceFile, walkFiles, renderMarkdown, scanUnit, type Pattern } from "./CodebasePatternsScanner.ts";
 
 let sandbox: string;
 
@@ -296,5 +296,44 @@ describe("walkFiles", () => {
     const many = join(sandbox, "many-files");
     for (let i = 0; i < 20; i++) put(many, `src/f${i}.ts`, `export const f${i} = ${i};`);
     expect(walkFiles(many, 5).length).toBeLessThanOrEqual(5);
+  });
+});
+
+// A test that builds a fixture app out of string literals looks exactly like an
+// app to a regex. This scanner is such a test's own subject, so it reported its
+// own fixtures — and its own pattern literals — as the repo's conventions.
+describe("evidence excludes fixtures and this scanner itself", () => {
+  test("a test file's fixture strings are not repo evidence", () => {
+    const repo = join(sandbox, "fixture-bleed");
+    put(repo, "package.json", JSON.stringify({ name: "fixture-bleed" }));
+    put(repo, "src/index.ts", "export const noop = () => undefined;");
+    // Same shape as this very file: an app written as strings inside a test.
+    put(repo, "src/scan.test.ts", [
+      "const app = [",
+      '  `import { Hono } from "hono";`,',
+      '  `import { z } from "zod";`,',
+      '  `export function requireAuth(t: string) { return !!t; }`,',
+      '  `export class AppError extends Error {}`,',
+      "].join('\\n');",
+    ].join("\n"));
+
+    const p = detectPatterns(repo, walkFiles(repo));
+    for (const name of ["Auth", "Validation", "Errors", "HTTP framework"]) {
+      expect(field(p, name).detected).toBe(false);
+    }
+    // The same strings in real source ARE evidence — proving the filter is
+    // scoped to test files, not blind to the patterns themselves.
+    put(repo, "src/real.ts", 'import { Hono } from "hono";\nexport function requireAuth(t: string) { return !!t; }\n');
+    const q = detectPatterns(repo, walkFiles(repo));
+    expect(field(q, "Auth").detected).toBe(true);
+    expect(field(q, "HTTP framework").detected).toBe(true);
+  });
+
+  test("the scanner's own source is not evidence", () => {
+    expect(isEvidenceFile("/repo/skill/tools/CodebasePatternsScanner.ts")).toBe(false);
+    expect(isEvidenceFile("/repo/src/CodebasePatternsScanner.test.ts")).toBe(false);
+    expect(isEvidenceFile("/repo/src/__tests__/thing.ts")).toBe(false);
+    expect(isEvidenceFile("/repo/src/index.ts")).toBe(true);
+    expect(isEvidenceFile("/repo/src/scanner.ts")).toBe(true);
   });
 });

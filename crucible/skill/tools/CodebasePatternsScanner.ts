@@ -216,15 +216,25 @@ function importRe(pkgs: string[]): RegExp {
 
 // ── Pattern detection ───────────────────────────────────────────────────────
 
+/** Test files, and this scanner itself. */
+export function isEvidenceFile(path: string): boolean {
+  if (/\.(test|spec)\.[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(go|py)$|(^|\/)(__tests__|__mocks__|fixtures)\//.test(path)) return false;
+  return !/(^|\/)CodebasePatternsScanner\.ts$/.test(path);
+}
+
 export function detectPatterns(root: string, files: string[]): Pattern[] {
   const patterns: Pattern[] = [];
   const m = readManifest(root);
+  // Content detectors read source only. A test writes fixture apps as string
+  // literals and this file carries every pattern it hunts for, so both answer
+  // "does the repo use X?" with a confident yes about themselves.
+  const src = files.filter(isEvidenceFile);
   const at = (hit: { path: string; line: number }) => `\`${rel(root, hit.path)}:${hit.line}\``;
   const push = (field: string, value: string | undefined) =>
     patterns.push({ field, detected: !!value, value });
 
   // Auth
-  const authFn = findFirst(files, /(export\s+(?:async\s+)?function\s+(withAuth|requireAuth|requireUser|authenticate|verifyAuth|verifyToken|getSession|authMiddleware|login_required)|export\s+const\s+(withAuth|requireAuth|requireUser|authenticate)\s*=|@login_required|@requires_auth)/);
+  const authFn = findFirst(src, /(export\s+(?:async\s+)?function\s+(withAuth|requireAuth|requireUser|authenticate|verifyAuth|verifyToken|getSession|authMiddleware|login_required)|export\s+const\s+(withAuth|requireAuth|requireUser|authenticate)\s*=|@login_required|@requires_auth)/);
   const authPkg = firstDep(m, ["next-auth", "@auth/core", "passport", "jsonwebtoken", "jose", "lucia", "@clerk/nextjs", "@supabase/auth-helpers-nextjs", "bcrypt", "bcryptjs", "argon2"]);
   push("Auth", authFn
     ? `${at(authFn)} — \`${authFn.snippet}\``
@@ -232,13 +242,13 @@ export function detectPatterns(root: string, files: string[]): Pattern[] {
 
   // Validation
   const valPkg = firstDep(m, ["zod", "yup", "joi", "valibot", "ajv", "class-validator", "superstruct", "io-ts", "@sinclair/typebox"]);
-  const valImport = findFirst(files, importRe(["zod", "yup", "joi", "valibot", "ajv", "class-validator", "superstruct", "io-ts", "pydantic", "marshmallow"]));
+  const valImport = findFirst(src, importRe(["zod", "yup", "joi", "valibot", "ajv", "class-validator", "superstruct", "io-ts", "pydantic", "marshmallow"]));
   push("Validation", valImport
     ? `\`${valImport.snippet}\` first seen at ${at(valImport)}`
     : valPkg ? `\`${valPkg}\` (declared in package.json)` : undefined);
 
   // Errors
-  const errClass = findFirst(files, /class\s+\w*(Http|Api|App|Domain|Validation|NotFound)?Error\s+extends\s+(Error|Exception)|class\s+\w+Error\(Exception\)/);
+  const errClass = findFirst(src, /class\s+\w*(Http|Api|App|Domain|Validation|NotFound)?Error\s+extends\s+(Error|Exception)|class\s+\w+Error\(Exception\)/);
   const errModule = firstExisting(root, ["src/errors.ts", "src/error.ts", "src/lib/errors.ts", "errors.ts", "src/exceptions.py", "exceptions.py"]);
   push("Errors", errClass
     ? `${at(errClass)} — \`${errClass.snippet}\``
@@ -246,8 +256,8 @@ export function detectPatterns(root: string, files: string[]): Pattern[] {
 
   // DB
   const dbPkg = firstDep(m, ["drizzle-orm", "@prisma/client", "typeorm", "sequelize", "mongoose", "knex", "kysely", "pg", "postgres", "mysql2", "better-sqlite3", "@libsql/client"]);
-  const dbImport = findFirst(files, importRe(["drizzle-orm", "@prisma/client", "typeorm", "sequelize", "mongoose", "knex", "kysely", "pg", "postgres", "sqlalchemy"]));
-  const d1Raw = findFirst(files, /\b(c\.env\.\w*DB\w*|env\.\w*DB\w*)\.prepare\s*\(/);
+  const dbImport = findFirst(src, importRe(["drizzle-orm", "@prisma/client", "typeorm", "sequelize", "mongoose", "knex", "kysely", "pg", "postgres", "sqlalchemy"]));
+  const d1Raw = findFirst(src, /\b(c\.env\.\w*DB\w*|env\.\w*DB\w*)\.prepare\s*\(/);
   push("DB", dbImport
     ? `\`${dbImport.snippet}\` first seen at ${at(dbImport)}`
     : d1Raw ? `raw prepared statements — \`${d1Raw.snippet}\` at ${at(d1Raw)}`
@@ -255,7 +265,7 @@ export function detectPatterns(root: string, files: string[]): Pattern[] {
 
   // Logger
   const logPkg = firstDep(m, ["pino", "winston", "bunyan", "consola", "loglevel", "signale"]);
-  const logger = findFirst(files, /(export\s+(const|function)\s+logger|import\s+\{[^}]*\blogger\b[^}]*\}\s+from|^\s*import\s+logging\b)/m);
+  const logger = findFirst(src, /(export\s+(const|function)\s+logger|import\s+\{[^}]*\blogger\b[^}]*\}\s+from|^\s*import\s+logging\b)/m);
   push("Logger", logger
     ? `${at(logger)} — \`${logger.snippet}\``
     : logPkg ? `\`${logPkg}\` (declared in package.json)` : undefined);
@@ -278,23 +288,23 @@ export function detectPatterns(root: string, files: string[]): Pattern[] {
 
   // HTTP framework
   const httpPkg = firstDep(m, ["hono", "express", "fastify", "koa", "itty-router", "@nestjs/core", "next", "@remix-run/node", "@sveltejs/kit", "elysia"]);
-  const httpImport = findFirst(files, importRe(["hono", "express", "fastify", "koa", "itty-router", "flask", "fastapi", "django"]));
+  const httpImport = findFirst(src, importRe(["hono", "express", "fastify", "koa", "itty-router", "flask", "fastapi", "django"]));
   push("HTTP framework", httpImport
     ? `\`${httpImport.snippet}\` first seen at ${at(httpImport)}`
     : httpPkg ? `\`${httpPkg}\` (declared in package.json)` : undefined);
 
   // Routing
   const routeDir = firstExisting(root, ["src/routes", "routes", "src/app", "app", "src/pages", "pages", "src/api", "api", "src/controllers"]);
-  const routerCall = findFirst(files, /\b(new\s+Hono\(|express\.Router\(|Router\(\)|createBrowserRouter\()/);
+  const routerCall = findFirst(src, /\b(new\s+Hono\(|express\.Router\(|Router\(\)|createBrowserRouter\()/);
   push("Routing", routeDir
     ? `\`${routeDir}/\` directory-based`
     : routerCall ? `programmatic — \`${routerCall.snippet}\` at ${at(routerCall)}` : undefined);
 
   // Secrets
-  const cfEnv = findFirst(files, /\bc\.env\.[A-Z_][A-Z0-9_]*/);
-  const processEnv = findFirst(files, /\bprocess\.env\.[A-Z_][A-Z0-9_]*/);
-  const viteEnv = findFirst(files, /\bimport\.meta\.env\.[A-Z_][A-Z0-9_]*/);
-  const osEnv = findFirst(files, /\bos\.environ(\.get)?[.[(]/);
+  const cfEnv = findFirst(src, /\bc\.env\.[A-Z_][A-Z0-9_]*/);
+  const processEnv = findFirst(src, /\bprocess\.env\.[A-Z_][A-Z0-9_]*/);
+  const viteEnv = findFirst(src, /\bimport\.meta\.env\.[A-Z_][A-Z0-9_]*/);
+  const osEnv = findFirst(src, /\bos\.environ(\.get)?[.[(]/);
   const envExample = firstExisting(root, [".env.example", ".env.sample", ".dev.vars.example"]);
   push("Secrets", cfEnv
     ? `\`c.env.NAME\` request-bound bindings (first at ${at(cfEnv)})`
@@ -305,7 +315,7 @@ export function detectPatterns(root: string, files: string[]): Pattern[] {
 
   // Background work
   const bgPkg = firstDep(m, ["bullmq", "bull", "agenda", "celery", "node-cron", "graphile-worker"]);
-  const waitUntil = findFirst(files, /\b(c\.executionCtx|ctx|event)\.waitUntil\s*\(/);
+  const waitUntil = findFirst(src, /\b(c\.executionCtx|ctx|event)\.waitUntil\s*\(/);
   push("Background work", waitUntil
     ? `\`waitUntil(...)\` (first at ${at(waitUntil)})`
     : bgPkg ? `\`${bgPkg}\` (declared in package.json)` : undefined);

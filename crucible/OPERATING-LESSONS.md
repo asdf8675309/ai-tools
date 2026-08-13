@@ -639,6 +639,24 @@ I designed my reviewer fleet from first principles and assumed it covered the sp
 
 Each time, a smaller lineup found a real hole in a more elaborate one. Designing from first principles gives you a coherent set, not a complete one — and the gaps are exactly the ones your framing made invisible. Budget an audit against someone else's lineup every few months; it takes an afternoon.
 
+### Half of a prompt's tool calls can be the model learning to use the tools
+
+Crucible's preflight was eight numbered steps of pure I/O — resolve config, classify eligibility, survey patterns, build the packet, pre-scan for injection, read the deny-list, tier the risk — each one a shell command the prompt described and the agent invoked. On a three-file diff it took thirty-one sequential tool calls.
+
+Counting what those calls actually were is the lesson. Roughly half were not the prescribed work. They were the agent discovering the tools: running `--help`, grepping a tool's source to learn its flags, guessing a flag and retrying, and hunting the filesystem for checklist files that existed at neither documented path. The prescribed steps were about fifteen calls. The other sixteen were the cost of describing an interface in prose instead of fixing it.
+
+So the fix is not "batch the steps" or "write a better prompt." **A tool with a fixed contract has nothing to discover.** The eight steps became imports inside one program that emits a single object; the prompt became "run this, read the file, return it." The discovery class does not shrink — it disappears, because there is no longer an interface for the model to infer.
+
+The before-numbers above are measured. The after is not: the bundle has not been
+re-measured end to end, so treat "one call instead of thirty-one" as the structural
+claim it is — the tool makes one invocation possible — rather than a recorded result.
+
+Two corollaries worth having in advance. **A step that fails must fail loudly and name itself** — the reason a bundle is safe to trust is that a partial result is impossible, and a half-populated payload is otherwise indistinguishable from a fast success.
+
+And a limit worth stating plainly, because the obvious fix does not reach it: **the payload still transits the model.** An `--out <file>` flag keeps *stdout* to one summary line, which is worth doing. But the workflow then reads the packet, deny-list and chunked diff back out of the agent's structured result, and a workflow script has no filesystem — the runtime exposes `agent`/`log`/`phase`/`pipeline` and nothing else. So the round-trip is forced by the harness, not by the tool's output shape. Bundling removes the *discovery* cost; it does not remove the transit cost, and no flag on the tool can.
+
+The general shape: when a prompt enumerates commands, measure what fraction of the resulting calls are the work and what fraction is the model figuring out the interface. If the second number is large, the prompt is not the thing to fix.
+
 ---
 
 ## 14. Measuring which model belongs in which slot

@@ -301,8 +301,9 @@ describe("hardenProjectOverlay", () => {
     expect(overlay).toEqual({ models: { reviewer_security: "gateway-cheap" }, integrations: { gateway: {} } });
   });
 
-  test("the tracked-only list is exactly `models`", () => {
-    expect([...OVERLAY_TRACKED_ONLY_PROTECTED_PATHS]).toEqual(["models"]);
+  test("the tracked-only list is exactly the reviewer-selecting keys", () => {
+    // Exact-match on purpose: a silent addition or removal has to fail here.
+    expect([...OVERLAY_TRACKED_ONLY_PROTECTED_PATHS]).toEqual(["models", "degraded_overrides"]);
   });
 });
 
@@ -458,6 +459,101 @@ describe("resolution respects integration gates", () => {
     expect(r.base_url).toBe("https://gw.example/v1");
     expect(r.timeout_ms).toBe(DEFAULT_CONFIG.integrations.gateway.timeout_ms);
     expect(r.fallbacks).toEqual([]);
+  });
+
+  // ── Per-route timeout overrides ────────────────────────────────────────────
+
+  test("a per-key timeout overrides the gateway default", () => {
+    process.env[KEY_ENV] = SECRET;
+    const r = resolveReviewer("security", gatewayCfg({ gateway_model_timeouts: { "gateway-alt": 45_000 } }));
+    if (r.kind !== "gateway") throw new Error("unreachable");
+    expect(r.timeout_ms).toBe(45_000);
+  });
+
+  test("a key with no override still gets the gateway default", () => {
+    // Mirror case: without this, an override that clobbered every route would pass.
+    process.env[KEY_ENV] = SECRET;
+    const r = resolveReviewer("security", gatewayCfg({ gateway_model_timeouts: { "gateway-other": 45_000 } }));
+    if (r.kind !== "gateway") throw new Error("unreachable");
+    expect(r.timeout_ms).toBe(DEFAULT_CONFIG.integrations.gateway.timeout_ms);
+  });
+
+  test("a per-key override beats an explicit gateway-wide timeout", () => {
+    process.env[KEY_ENV] = SECRET;
+    const r = resolveReviewer(
+      "security",
+      gatewayCfg({
+        gateway_model_timeouts: { "gateway-alt": 45_000 },
+        integrations: { gateway: { enabled: true, base_url: "https://gw.example/v1", api_key_env: KEY_ENV, timeout_ms: 1_000 } },
+      }),
+    );
+    if (r.kind !== "gateway") throw new Error("unreachable");
+    expect(r.timeout_ms).toBe(45_000);
+  });
+
+  test("the shipped config declares the map, so the key is never undefined", () => {
+    expect(DEFAULT_CONFIG.gateway_model_timeouts).toEqual({});
+  });
+
+  test("the gateway runtime carries a max_tokens ceiling", () => {
+    process.env[KEY_ENV] = SECRET;
+    const r = resolveReviewer("security", gatewayCfg());
+    if (r.kind !== "gateway") throw new Error("unreachable");
+    expect(r.max_tokens).toBe(DEFAULT_CONFIG.integrations.gateway.max_tokens);
+    expect(r.max_tokens).toBeGreaterThan(8000);
+  });
+
+  test("config can raise the gateway max_tokens ceiling", () => {
+    process.env[KEY_ENV] = SECRET;
+    const r = resolveReviewer(
+      "security",
+      gatewayCfg({
+        integrations: { gateway: { enabled: true, base_url: "https://gw.example/v1", api_key_env: KEY_ENV, max_tokens: 32_000 } },
+      }),
+    );
+    if (r.kind !== "gateway") throw new Error("unreachable");
+    expect(r.max_tokens).toBe(32_000);
+  });
+
+  // ── Degraded-band overrides ────────────────────────────────────────────────
+
+  const degradedCfg = () =>
+    cfgWith({
+      models: { reviewer_security: "claude-opus", reviewer_simplify: "claude-opus" },
+      degraded_overrides: { bands: ["AMBER", "RED"], roles: { reviewer_security: "claude-haiku" } },
+    });
+
+  test("no band passed → overrides are inert (the default checkout)", () => {
+    expect(resolveReviewer("security", degradedCfg()).provider_key).toBe("claude-opus");
+  });
+
+  test("a matching band re-points the named role", () => {
+    expect(resolveReviewer("security", degradedCfg(), "RED").provider_key).toBe("claude-haiku");
+  });
+
+  test("a non-matching band leaves the role alone", () => {
+    expect(resolveReviewer("security", degradedCfg(), "GREEN").provider_key).toBe("claude-opus");
+  });
+
+  test("in a matching band, a role the block does not name keeps its configured key", () => {
+    // Mirror case. Without it, an override that clobbered every role would pass above.
+    expect(resolveReviewer("simplify", degradedCfg(), "RED").provider_key).toBe("claude-opus");
+  });
+
+  test("an overlay cannot smuggle in overrides when it is tracked", () => {
+    const r = hardenProjectOverlay(
+      { degraded_overrides: { bands: ["RED"], roles: { reviewer_security: "claude-haiku" } } },
+      { overlayTracked: true },
+    );
+    expect(r.dropped).toContain("degraded_overrides");
+  });
+
+  test("bands are opaque strings — any vocabulary works", () => {
+    const cfg = cfgWith({
+      models: { reviewer_security: "claude-opus" },
+      degraded_overrides: { bands: ["incident"], roles: { reviewer_security: "claude-haiku" } },
+    });
+    expect(resolveReviewer("security", cfg, "incident").provider_key).toBe("claude-haiku");
   });
 
   test("disabled integration falls back to Claude and says why", () => {

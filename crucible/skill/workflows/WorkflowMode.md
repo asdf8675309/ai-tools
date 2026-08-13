@@ -82,7 +82,7 @@ workflows dir, `cp` instead and re-copy after edits.)
 
 | Phase | What runs |
 |-------|-----------|
-| Preflight | one agent: resolve config via `tools/Config.ts` + eligibility (Phase 0) + `CodebasePatternsScanner.ts` (Phase 1) + `ReviewPacketGenerator.ts` (Phase 1.5). Early-returns BLOCK if ineligible. |
+| Preflight | one agent, one command: `tools/Preflight.ts --out <file>`. The tool bundles config resolution, eligibility (Phase 0), the pattern survey (Phase 1), the review packet (Phase 1.5), Python tabify (R10), the injection pre-scan, the removal-tracking gate (R12), the deny-list reads and risk tiering (Phase 2) into one deterministic pass, and emits one object matching `PREFLIGHT_SCHEMA`. The agent runs it, reads the file, and returns it. Early-returns BLOCK if ineligible. |
 | Verify | one agent: build + typecheck + tests fast-fail (Phase 2). Early-returns BLOCK on failure — no reviewers spawned. |
 | Review | `pipeline()` over reviewers; each reviewer enumerates (Pass 1) then its candidates flow straight into per-reviewer disprove (Pass 2) with no barrier. Split-severity = two passes/reviewer. |
 | Consolidate | barrier. Mechanical filters in pure JS (disproven, confidence floor, per-reviewer cap by impact−0.5·effort); one agent for semantic deny-list match + cross-reviewer dedup. |

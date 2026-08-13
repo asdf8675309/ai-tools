@@ -220,6 +220,26 @@ gateway_model_map:
   gateway-deepseek-pro: deepseek/deepseek-v4-pro
   gateway-embedding:    openai/text-embedding-3-small
 
+# Per-route timeout override, ms. Anything absent uses integrations.gateway.timeout_ms.
+# Raise a key here when a route is SLOW rather than broken — at one shared ceiling the
+# two are indistinguishable, and a slow route timing out intermittently reads as a
+# flaky reviewer. Measure before raising.
+gateway_model_timeouts:
+  gateway-deepseek-pro: 45000
+
+
+# Re-point reviewer roles while the CALLER reports a degraded band. Nothing here
+# discovers a band — pass one (`--band AMBER`, or `band:` in the workflow args) or this
+# block is inert, which is what a default checkout wants. Bands are opaque strings.
+#
+# Prefer pointing at ANOTHER GATEWAY ROUTE, as below. Re-pointing outside the routing
+# layer works, but it discards the model choice your evaluation measured — see
+# ci/GATEWAY-ROUTING.md.
+degraded_overrides:
+  bands: ["AMBER", "RED"]
+  roles:
+    reviewer_test_runner: gateway-gemini-flash
+
 local_model_map:
   local-embed:
     endpoint: http://localhost:1234/v1
@@ -251,6 +271,10 @@ integrations:
     base_url: "https://your-gateway.example/v1"
     api_key_env: "CRUCIBLE_GATEWAY_TOKEN"
     timeout_ms: 60000
+    # Reviewer output is a structured finding list, not a chat reply. At a chat-sized
+    # ceiling the response truncates mid-JSON, fails to parse, and the pass reads as a
+    # REVIEWER FAILURE rather than as a ceiling set too low.
+    max_tokens: 16384
 
   local_models:
     enabled: true

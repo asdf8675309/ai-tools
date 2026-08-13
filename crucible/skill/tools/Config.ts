@@ -90,6 +90,8 @@ export interface GatewayIntegration {
   /** NAME of the env var holding the key — never the key itself. */
   api_key_env: string;
   timeout_ms: number;
+  /** Output ceiling for a gateway reviewer call. */
+  max_tokens: number;
 }
 
 export interface ToggleIntegration {
@@ -168,6 +170,15 @@ export interface ModelAssignments {
   embedding_primary: string | null;
 }
 
+/** Re-point reviewer roles while the caller reports a degraded operating band.
+ * `bands` are opaque strings compared for equality, so any vocabulary works. */
+export interface DegradedOverrides {
+  /** Bands in which the overrides apply, e.g. ["AMBER", "RED"]. */
+  bands: string[];
+  /** `reviewer_<role>` → provider-key to use instead while in one of those bands. */
+  roles: Record<string, string>;
+}
+
 export interface LightPathConfig {
   enabled: boolean;
   allow_extensions: string[];
@@ -205,9 +216,13 @@ export interface CrucibleConfig {
   reviewer_fallback_chain: string[];
   claude_model_map: Record<string, string>;
   gateway_model_map: Record<string, string>;
+  /** Per-provider-key timeout override, in ms. Falls back to `integrations.gateway.timeout_ms`. */
+  gateway_model_timeouts: Record<string, number>;
   local_model_map: Record<string, LocalModelEntry>;
   external_cli_map: Record<string, ExternalCliEntry>;
   integrations: Integrations;
+  /** Inert unless a caller passes a band to `resolveReviewer`. */
+  degraded_overrides: DegradedOverrides | null;
   light_path: LightPathConfig;
   risk_tiers: RiskTierConfig;
   thresholds: Thresholds;
@@ -249,10 +264,12 @@ export const DEFAULT_CONFIG: CrucibleConfig = {
   reviewer_fallback_chain: [LAST_RESORT_PROVIDER_KEY],
   claude_model_map: { "claude-opus": "opus", "claude-sonnet": "sonnet", "claude-haiku": "haiku" },
   gateway_model_map: {},
+  gateway_model_timeouts: {},
+  degraded_overrides: null,
   local_model_map: {},
   external_cli_map: {},
   integrations: {
-    gateway: { enabled: false, base_url: "", api_key_env: "", timeout_ms: 60000 },
+    gateway: { enabled: false, base_url: "", api_key_env: "", timeout_ms: 60000, max_tokens: 16384 },
     local_models: { enabled: false },
     external_cli: { enabled: false },
     verdict_log: { enabled: false, path: ".crucible/verdicts.jsonl" },
@@ -388,7 +405,9 @@ export const OVERLAY_PROTECTED_PATHS: readonly string[] = [
  * `models.reviewer_security` at the weakest key you trust; an untracked one is
  * the eval-run override FullReview.md documents. Same path, so git decides.
  */
-export const OVERLAY_TRACKED_ONLY_PROTECTED_PATHS: readonly string[] = ["models"];
+// `degraded_overrides` re-points roles to other provider-keys, so it selects reviewers
+// exactly as `models` does — same class, same clamp.
+export const OVERLAY_TRACKED_ONLY_PROTECTED_PATHS: readonly string[] = ["models", "degraded_overrides"];
 
 /**
  * Only exit 1 ("not in the index") means untracked. Every other failure leaves
@@ -628,7 +647,15 @@ export interface FallbackHop {
 /** How the caller must dispatch this reviewer, carrying only that runtime's fields. */
 export type ModelRuntime =
   | { kind: "claude"; provider_key: string; model: string }
-  | { kind: "gateway"; provider_key: string; model: string; base_url: string; api_key_env: string; timeout_ms: number }
+  | {
+      kind: "gateway";
+      provider_key: string;
+      model: string;
+      base_url: string;
+      api_key_env: string;
+      timeout_ms: number;
+      max_tokens: number;
+    }
   | { kind: "local"; provider_key: string; endpoint: string; model: string; dim?: number }
   | { kind: "cli"; provider_key: string; command: string; args: string[]; reasoning_effort?: string };
 
@@ -660,7 +687,13 @@ function probe(providerKey: string, cfg: CrucibleConfig): ProbeResult {
         model,
         base_url: g.base_url,
         api_key_env: g.api_key_env,
-        timeout_ms: g.timeout_ms ?? DEFAULT_CONFIG.integrations.gateway.timeout_ms,
+        // Per-key first, then the gateway-wide default. A route that is merely slow
+        // must not read as a dead one, and a shared ceiling cannot tell them apart.
+        timeout_ms:
+          cfg.gateway_model_timeouts?.[providerKey] ??
+          g.timeout_ms ??
+          DEFAULT_CONFIG.integrations.gateway.timeout_ms,
+        max_tokens: g.max_tokens ?? DEFAULT_CONFIG.integrations.gateway.max_tokens,
       },
     };
   }
@@ -737,15 +770,41 @@ export function resolveProviderKey(
   return { kind: "claude", provider_key: LAST_RESORT_PROVIDER_KEY, model: LAST_RESORT_MODEL, fallbacks: hops };
 }
 
+/**
+ * The provider-key a role should use, honouring `degraded_overrides` when the caller
+ * reports a matching band. `band` undefined → no override, which is the default and
+ * the only behaviour a stock checkout ever sees.
+ */
+function assignedProviderKey(
+  roleKey: keyof ModelAssignments,
+  cfg: CrucibleConfig,
+  band?: string,
+): string | null | undefined {
+  const ov = cfg.degraded_overrides;
+  if (band && ov?.bands?.includes(band)) {
+    const overridden = ov.roles?.[roleKey as string];
+    // A role the block does not name falls through to its configured key, not to the
+    // fallback chain: a degraded band re-points what it lists, it does not unassign
+    // everything else.
+    if (typeof overridden === "string" && overridden.length > 0) return overridden;
+  }
+  return cfg.models?.[roleKey];
+}
+
 export function resolveAssignment(
   roleKey: keyof ModelAssignments,
   cfg: CrucibleConfig = loadConfig(),
+  band?: string,
 ): ResolvedModel {
-  return resolveProviderKey(cfg.models?.[roleKey], cfg);
+  return resolveProviderKey(assignedProviderKey(roleKey, cfg, band), cfg);
 }
 
-export function resolveReviewer(role: ReviewerRole, cfg: CrucibleConfig = loadConfig()): ResolvedModel {
-  return resolveAssignment(`reviewer_${role}` as keyof ModelAssignments, cfg);
+export function resolveReviewer(
+  role: ReviewerRole,
+  cfg: CrucibleConfig = loadConfig(),
+  band?: string,
+): ResolvedModel {
+  return resolveAssignment(`reviewer_${role}` as keyof ModelAssignments, cfg, band);
 }
 
 /** Null when the second opinion is off by config — never a silent Claude substitute. */

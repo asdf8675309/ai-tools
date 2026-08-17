@@ -26,9 +26,11 @@
  *                          function in the corpus) and emit candidates above the
  *                          configured threshold as JSON.
  *
- * Function extraction is regex-based: function declarations, arrow functions
- * assigned to a binding, and single-line class methods. Multi-line class methods
- * and complex destructured forms would need a real AST.
+ * Function extraction is regex-based: function declarations (optional generic
+ * clause, up to 3 levels of <> nesting), arrow functions assigned to a
+ * binding, Hono/Express-style inline route handlers, and single-line class
+ * methods. Multi-line class methods and complex destructured forms would need
+ * a real AST.
  */
 
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
@@ -89,10 +91,17 @@ export function extractFunctions(source: string, path: string): FunctionRecord[]
   const records: FunctionRecord[] = [];
   const lines = source.split("\n");
 
-  // function name(args) { ... }  — including async, export, generators
-  const FUNCTION_DECL = /^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([a-zA-Z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]+)?\s*\{/;
+  // function name<T>(args) { ... }  — including async, export, generators.
+  // Generic clause supports up to 3 levels of <> nesting (e.g. T extends Array<Map<K, V>>).
+  const FUNCTION_DECL = /^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([a-zA-Z_$][\w$]*)\s*(?:<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?\s*\([^)]*\)\s*(?::[^{]+)?\s*\{/;
   // const name = (...) => ...  — including async arrow
   const ARROW_ASSIGN = /^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::[^=]+)?=>\s*/;
+  // owner.verb("path", ...middleware, (params) => { ...  — Hono/Express inline route handlers.
+  // Verb is whitelisted to HTTP methods and the path argument must be a string/template literal —
+  // together these rule out same-named methods elsewhere (Map.get, R2 bucket .put, EventEmitter-style
+  // .on, .then, etc.) that would otherwise look identical in shape. "on" is deliberately excluded from
+  // the whitelist: it collides with EventEmitter/addEventListener far more often than with Hono routing.
+  const HONO_ROUTE = /^\s*(?:export\s+)?[a-zA-Z_$][\w$]*\.(get|post|put|patch|delete|options|head|all)\(\s*(['"`])((?:[^'"`\\]|\\.)*?)\2\s*(?:,.*?)?(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>\s*\{/;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
@@ -101,6 +110,11 @@ export function extractFunctions(source: string, path: string): FunctionRecord[]
       name = line.match(FUNCTION_DECL)?.[1] ?? null;
     } else if (ARROW_ASSIGN.test(line)) {
       name = line.match(ARROW_ASSIGN)?.[1] ?? null;
+    } else if (HONO_ROUTE.test(line)) {
+      // Synthetic name: "<verb> <path>" (e.g. "put /api/admin/products/:id") — deterministic,
+      // stable across re-runs on unchanged source, and legible in a clone report without an identifier.
+      const m = line.match(HONO_ROUTE);
+      name = m ? `${m[1]} ${m[3]}` : null;
     }
     if (!name) continue;
 

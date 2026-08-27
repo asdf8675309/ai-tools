@@ -1,0 +1,146 @@
+import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  extractCitations,
+  isOutOfContract,
+  resolveCitation,
+  resolveVerdict,
+  survives,
+  type RawVerdict,
+} from './DisproveVerdict';
+
+// A real tree to resolve citations against. `src/real.ts` is 5 lines long.
+const ROOT = mkdtempSync(join(tmpdir(), 'disprove-verdict-'));
+mkdirSync(join(ROOT, 'src'), { recursive: true });
+writeFileSync(join(ROOT, 'src/real.ts'), 'a\nb\nc\nd\ne\n');
+
+const OPTS = { repoRoot: ROOT, floor: 80, requireCitationMinSeverity: 'HIGH' };
+const v = (raw: Partial<RawVerdict>, severity = 'HIGH') =>
+  resolveVerdict({ id: 'X', ...raw } as RawVerdict, { ...OPTS, severity });
+
+describe('confidence contract (P5 — 22 measured instances)', () => {
+  test('a 0-1 scale value is out of contract', () => {
+    expect(isOutOfContract(0.95)).toBe(true);
+    expect(isOutOfContract(0.15)).toBe(true);
+  });
+
+  // NEGATIVE CONTROL: normal values must stay in contract, or the guard is
+  // just rejecting everything and the floor is effectively disabled.
+  test('normal 0-100 values are in contract', () => {
+    for (const c of [0, 40, 80, 95, 100]) expect(isOutOfContract(c)).toBe(false);
+  });
+
+  test('0.95 "Finding is valid" is NOT deleted by the floor', () => {
+    const r = v({ disproven: false, confidence_after_check: 0.95, reason: 'Finding is valid.' });
+    expect(r.verdict).toBe('CANNOT_VERIFY');
+    expect(survives(r)).toBe(true);
+    expect(r.unverified).toBe(true);
+  });
+
+  test('a 0.15 kill does NOT land', () => {
+    const r = v({ disproven: true, confidence_after_check: 0.15, reason: 'handled upstream' });
+    expect(survives(r)).toBe(true);
+  });
+
+  // NEGATIVE CONTROL: a genuine low confidence is still low confidence.
+  test('a genuine 40 is still treated as uncertain, not rescued', () => {
+    const r = v({ disproven: false, confidence_after_check: 40, reason: 'unsure' });
+    expect(r.verdict).toBe('CANNOT_VERIFY');
+    expect(r.confidence).toBe(80);
+  });
+});
+
+describe('citation validation (B1 — most kills cite nothing)', () => {
+  test('extracts path and line', () => {
+    expect(extractCitations('see src/real.ts:3 for the guard')).toEqual([{ path: 'src/real.ts', line: 3 }]);
+  });
+
+  test('resolves a real file at an in-range line', () => {
+    expect(resolveCitation([{ path: 'src/real.ts', line: 3 }], ROOT)).toBe(true);
+  });
+
+  test('rejects a real file at an out-of-range line', () => {
+    expect(resolveCitation([{ path: 'src/real.ts', line: 9999 }], ROOT)).toBe(false);
+  });
+
+  test('rejects a path that escapes the tree under review', () => {
+    expect(resolveCitation([{ path: '../../../etc/passwd' }], ROOT)).toBe(false);
+  });
+
+  test('a HIGH kill citing nothing is downgraded, not honoured', () => {
+    const r = v({ disproven: true, confidence_after_check: 95, reason: 'handled upstream somewhere' });
+    expect(r.verdict).toBe('CANNOT_VERIFY');
+    expect(r.downgradeReason).toContain('cites no code');
+    expect(survives(r)).toBe(true);
+  });
+
+  test('a HIGH kill citing a nonexistent file is downgraded', () => {
+    const r = v({ disproven: true, confidence_after_check: 95, reason: 'guarded at src/ghost.ts:2' });
+    expect(survives(r)).toBe(true);
+  });
+
+  // NEGATIVE CONTROL: the whole point is that GOOD kills still kill. If this
+  // test ever goes green alongside the ones above, the filter is disabled.
+  test('a HIGH kill citing real resolvable code STILL KILLS', () => {
+    const r = v({ disproven: true, confidence_after_check: 95, reason: 'guarded at src/real.ts:2' });
+    expect(r.verdict).toBe('DISPROVEN_EVIDENCE');
+    expect(r.disproven).toBe(true);
+    expect(survives(r)).toBe(false);
+  });
+
+  // Severity scoping: the citation requirement is bounded, by design.
+  test('a MEDIUM kill citing nothing is still honoured at min-severity HIGH', () => {
+    const r = v({ disproven: true, confidence_after_check: 95, reason: 'no citation' }, 'MEDIUM');
+    expect(r.verdict).toBe('DISPROVEN_EVIDENCE');
+  });
+});
+
+describe('the floor is no longer one-directional (A1 — both directions measured)', () => {
+  test('a sub-floor KEEP surfaces flagged instead of vanishing', () => {
+    const r = v({ disproven: false, confidence_after_check: 72, reason: 'looks real' });
+    expect(survives(r)).toBe(true);
+    expect(r.unverified).toBe(true);
+    expect(r.downgradeReason).toContain('below floor');
+  });
+
+  test('a sub-floor KILL cannot delete anything', () => {
+    const r = v({ disproven: true, confidence_after_check: 15, reason: 'fine at src/real.ts:1' });
+    expect(survives(r)).toBe(true);
+  });
+
+  test('a failed call still fails open', () => {
+    const r = v({ failed: true, confidence_after_check: null });
+    expect(survives(r)).toBe(true);
+    expect(r.unverified).toBe(true);
+  });
+});
+
+describe('cross-vendor split survives (A2)', () => {
+  test('a split makes the finding survive, flagged for a human', () => {
+    const r = v({ disproven: true, confidence_after_check: 88, disproven_cross_vendor: false, reason: 'x' });
+    expect(r.disagreement).toBe(true);
+    expect(survives(r)).toBe(true);
+  });
+
+  // NEGATIVE CONTROL: agreement is not a disagreement.
+  test('both vendors agreeing to kill, with a real citation, still kills', () => {
+    const r = v({
+      disproven: true,
+      confidence_after_check: 88,
+      disproven_cross_vendor: true,
+      reason: 'guarded at src/real.ts:1',
+    });
+    expect(r.disagreement).toBe(false);
+    expect(survives(r)).toBe(false);
+  });
+});
+
+describe('unrecognized shapes fail open', () => {
+  test('an unknown verdict shape surfaces rather than dropping', () => {
+    const r = v({ confidence_after_check: 90, reason: 'no disproven field at all' });
+    expect(r.verdict).toBe('AGREE');
+    expect(survives(r)).toBe(true);
+  });
+});

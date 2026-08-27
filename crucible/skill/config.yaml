@@ -307,6 +307,13 @@ thresholds:
   large_pr_warn_loc:                  400    # Phase 0 — soft warning, proceed on confirmation
   large_pr_block_loc:                 1000   # Phase 0 — hard block, demand decomposition
   cross_vendor_disprove_min_severity: HIGH   # severity floor for the second disprove opinion
+  # At or above this severity a kill verdict must cite code that resolves in the
+  # tree under review, or it is downgraded to CANNOT_VERIFY and the finding
+  # survives flagged. Measured basis: roughly four in five kill verdicts across real
+  # runs cite no resolvable file. Scoped to HIGH+ deliberately — requiring it everywhere at
+  # once would surface more than a reviewer can read. Lower it once you have
+  # measured the volume on your own repo.
+  require_citation_min_severity:      HIGH
   clone_mrs_threshold:                0.80   # semantic clone Max Redundancy Score; recalibrate per embedding model
   removal_tracking_max_ratio:         3.0    # added/removed LOC ratio at or above which R12 emits a structural candidate
   reviewer_batch:                     auto   # Phase 3 concurrency. `auto` = fan out fully, then retry

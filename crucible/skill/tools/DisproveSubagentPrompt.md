@@ -137,7 +137,7 @@ Return ONLY this JSON (no other text):
 {
   "id": "{{ID}}",
   "disproven": true | false,
-  "confidence_after_check": <0-100>,
+  "confidence_after_check": <0-100, on THIS scale — 0.95 is not 95>,
   "reason": "<one sentence: why disproven, or why still real>",
   "evidence_strengthened": "<optional: what specifically makes this finding stronger than Pass 1 stated>"
 }
@@ -152,7 +152,9 @@ Return ONLY this JSON (no other text):
 | 50-69 | Uncertain — used heuristics, don't have a complete picture |
 | 0-49 | Could not verify either way; default to NOT disproven (`disproven: false`) so the candidate surfaces to the user |
 
-If your confidence is < 80, the Phase 5 filter will drop the finding regardless of `disproven` value — so be honest about uncertainty rather than padding to 80+.
+Answer on the **0-100 scale above**. A value between 0 and 1 is read as out-of-contract and the candidate is surfaced unadjudicated — `0.95` does not mean 95 here.
+
+Be honest about uncertainty rather than padding to 80+. A confidence below the floor no longer deletes anything in either direction: a low-confidence `disproven: false` surfaces flagged instead of vanishing, and a low-confidence `disproven: true` cannot kill the finding. Padding buys you nothing and costs the reviewer the signal.
 
 ## DURATION
 
@@ -166,3 +168,5 @@ The sycophancy failure mode: when a sub-agent receives "verify this finding," it
 ## Why confidence < 80 surfaces
 
 If the sub-agent can't verify either way, the candidate stays a candidate and surfaces to the user. Better to surface a maybe-real finding than to silently drop it with a low-confidence "disproven" verdict. The Phase 5 cap (5 findings per reviewer) handles volume; the confidence floor handles certainty.
+
+This section used to be false. Eleven lines above it, this file told you the Phase 5 filter would drop a sub-floor finding "regardless of `disproven` value" — and it did, in a large share of the verdicts recoverable from real runs. `tools/DisproveVerdict.ts` is what makes the paragraph true: it resolves every raw verdict into `AGREE`, `DISPROVEN_EVIDENCE`, or `CANNOT_VERIFY`, and only `DISPROVEN_EVIDENCE` removes a finding. **You cannot reach it by asserting a guard exists — at or above `thresholds.require_citation_min_severity` your reason must cite a file and line that resolve in the tree under review.** Roughly four in five kill verdicts across those runs cited nothing at all.

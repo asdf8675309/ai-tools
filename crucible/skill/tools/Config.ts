@@ -192,6 +192,8 @@ export interface RiskTierConfig {
 
 export interface Thresholds {
   confidence_floor: number;
+  /** Kills at or above this severity must cite code that resolves. */
+  require_citation_min_severity: string;
   per_reviewer_cap: number;
   large_pr_warn_loc: number;
   large_pr_block_loc: number;
@@ -303,6 +305,7 @@ export const DEFAULT_CONFIG: CrucibleConfig = {
     large_pr_warn_loc: 400,
     large_pr_block_loc: 1000,
     cross_vendor_disprove_min_severity: "HIGH",
+    require_citation_min_severity: "HIGH",
     clone_mrs_threshold: 0.8,
     removal_tracking_max_ratio: 3.0,
   },

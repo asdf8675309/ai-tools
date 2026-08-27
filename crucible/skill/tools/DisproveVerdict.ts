@@ -142,11 +142,17 @@ export function resolveCitation(
       continue;
     }
     if (!st.isFile()) continue;
-    if (c.line === undefined) return true;
+    // A bare filename is not evidence anyone opened the file. Where the gate
+    // applies at all, it requires a line. (Re-filed by three lenses in round 2
+    // after round 1; the round-1 judgement that this was acceptable was wrong.)
+    if (c.line === undefined) continue;
     if (c.line < 1) continue;
     try {
-      const lines = readFileSync(real, 'utf8').split('\n').length;
-      if (c.line <= lines) return true;
+      const text = readFileSync(real, 'utf8');
+      // A trailing newline makes split() report one more line than the file
+      // has, so `lines` would accept a citation one past the end.
+      const lines = text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length;
+      if (lines > 0 && c.line <= lines) return true;
     } catch {
       continue;
     }
@@ -317,9 +323,22 @@ async function main() {
     console.error('DisproveVerdict: could not parse verdicts JSON');
     process.exit(2);
   }
-  const list: Array<RawVerdict & { severity?: string }> = Array.isArray(parsed)
-    ? (parsed as Array<RawVerdict & { severity?: string }>)
-    : ((parsed as { verdicts?: Array<RawVerdict & { severity?: string }> }).verdicts ?? []);
+  // Valid JSON of the wrong shape used to reach `.map` and throw. A crash here
+  // is indistinguishable from "nothing to surface", which is the failure mode
+  // this whole file exists to remove.
+  const candidateList =
+    Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object'
+        ? (parsed as { verdicts?: unknown }).verdicts
+        : undefined;
+  if (!Array.isArray(candidateList)) {
+    console.error('DisproveVerdict: verdicts payload is not an array');
+    process.exit(2);
+  }
+  const list = candidateList.filter(
+    (r): r is RawVerdict & { severity?: string } => !!r && typeof r === 'object',
+  );
 
   const resolved = list.map((raw) => ({
     ...resolveVerdict(raw, { repoRoot, floor, requireCitationMinSeverity, severity: raw.severity }),

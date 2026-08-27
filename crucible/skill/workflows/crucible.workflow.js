@@ -410,10 +410,23 @@ const CROSS_VENDOR_MIN = thresholds.cross_vendor_disprove_min_severity ?? 'HIGH'
 // tree under review. Bounded deliberately: most kills cite nothing, so
 // requiring it everywhere at once would surface far more than a reviewer can
 // read. Raise the bar here once the impact is measured on real runs.
-const REQUIRE_CITATION_MIN_SEVERITY = thresholds.require_citation_min_severity ?? 'HIGH'
+// Validated against a closed set, not merely quoted. This value comes from
+// `.crucible.yaml` in the tree under review, and it is interpolated into a
+// shell command — quoting does not save you from a value containing a quote.
+// Anything unrecognized falls back to the safest setting rather than shipping
+// attacker-influenced text to a shell.
+const SEVERITY_WORDS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+const REQUIRE_CITATION_MIN_SEVERITY = SEVERITY_WORDS.includes(
+  String(thresholds.require_citation_min_severity ?? '').toUpperCase(),
+)
+  ? String(thresholds.require_citation_min_severity).toUpperCase()
+  : 'LOW'   // unrecognized => strictest: require a citation at every severity
 // Shell snippet resolving the tree under review, built once so it never has to
 // be nested inside a template literal at the call site.
-const REPO_ROOT_SH = REPO ? REPO : '$(git rev-parse --show-toplevel)'
+// Same reasoning: a repo path is only interpolated when it contains nothing
+// that can change the meaning of a shell word. Otherwise resolve it at runtime.
+const SHELL_SAFE = /^[A-Za-z0-9._\/@+-]+$/
+const REPO_ROOT_SH = REPO && SHELL_SAFE.test(REPO) ? REPO : '$(git rev-parse --show-toplevel)'
 // `auto` (default) fans out fully and retries failures once at a smaller batch;
 // an integer pins the batch size. Anything else falls back to `auto` rather than
 // silently dispatching one reviewer at a time.
@@ -668,12 +681,17 @@ Return the tool's \`resolved\` array verbatim as your verdicts, AND its \`summar
     { label: `disprove:${reviewerRole}`, phase: 'Review', agentType: 'general-purpose', model: 'haiku', schema: DISPROVE_BATCH_SCHEMA }
   )
 
-  // The agent is the transport for DisproveVerdict.ts, not the judge — but a
-  // workflow script has no filesystem access, so it cannot re-run the tool to
-  // check. What it CAN do is refuse a payload that contradicts itself: the tool
-  // emits a summary, and a fabricated or hand-edited `resolved` array has to
-  // keep that summary consistent to get through. Any mismatch means the
-  // resolution is unverified, and unverified never deletes a finding.
+  // ⚠️ WHAT THIS DOES AND DOES NOT PROVE. A workflow script has no filesystem
+  // access, so it cannot run DisproveVerdict.ts itself and cannot verify that
+  // the agent did. This check proves only that the returned payload is
+  // INTERNALLY CONSISTENT — an agent that fabricates both the array and a
+  // matching summary passes it. It raises the cost of a careless or lazy
+  // relay; it is not an integrity guarantee, and four independent reviewers
+  // were right to refuse the stronger claim.
+  //
+  // The real verification lives where a filesystem exists: FullReview.md runs
+  // the tool directly. The workflow edition therefore reports its disprove
+  // resolution as AGENT-RELAYED in Phase 7, so a reader knows which one ran.
   const rawVerdicts = batch?.verdicts ?? []
   const claimedKills = rawVerdicts.filter((v) => v?.verdict === 'DISPROVEN_EVIDENCE').length
   const reportedKills = batch?.summary?.killed
@@ -862,6 +880,9 @@ phase('Consolidate')
 // floor, sub-floor kills that landed anyway — so it no longer decides
 // survival on its own; DisproveVerdict.ts has already folded it into `verdict`.
 const survivors = allJudged.filter((c) => c.verdict !== 'DISPROVEN_EVIDENCE')
+// A vendor disagreement is a human call by contract (FullReview.md Phase 6a).
+// It survives, but it must never be auto-fixed.
+const disagreements = survivors.filter((c) => c.disagreement)
 
 // Per-reviewer cap by impact − 0.5·effort, ranked desc.
 const byReviewer = {}
@@ -908,7 +929,10 @@ log(`Consolidated — ${finalFindings.length} final findings (${criticals.length
 phase('Fix')
 
 let fixResult = null
-const fixTargets = [...criticals, ...highs]
+// A vendor disagreement survives and is reported, but it is a human call by
+// contract (FullReview.md Phase 6a) and must never be auto-fixed — picking a
+// side is exactly what the disagreement flag exists to prevent.
+const fixTargets = [...criticals, ...highs].filter((f) => !f.disagreement)
 
 // A sensitive diff disables autopilot — a human applies the fixes.
 if (effectiveAutopilot(AUTOPILOT, sensitive) && fixTargets.length > 0) {
@@ -976,7 +1000,7 @@ const sensitiveBanner = sensitive
   : ''
 const report = `# Crucible Review — ${verdict}
 ${reviewReliable ? '' : `\n> ⚠ **REVIEW INCOMPLETE** — ${failedPasses}/${reviewItems.length} reviewer passes failed to return structured output. This is NOT an APPROVE: findings below are partial. Re-run before trusting the result.\n`}${sensitiveBanner}
-${PR ? `**PR:** #${PR}` : '**Target:** local branch vs origin/main'} · **Findings:** ${finalFindings.length} (${criticals.length} CRITICAL, ${highs.length} HIGH, ${mediumsLows.length} MEDIUM/LOW) · **Reviewer passes:** ${completedPasses}/${reviewItems.length} completed${finalFindings.some((f) => f.disproveFailed) ? ` · ⚠ ${finalFindings.filter((f) => f.disproveFailed).length} finding(s) disprove-unverified (surfaced fail-open)` : ''}
+${PR ? `**PR:** #${PR}` : '**Target:** local branch vs origin/main'} · **Disprove resolution:** agent-relayed from \`DisproveVerdict.ts\` (this edition cannot verify the tool ran — see the parity note)${disagreements.length ? ` · ⚠️ ${disagreements.length} vendor-disagreement finding(s) excluded from auto-fix — human call` : ''} · **Findings:** ${finalFindings.length} (${criticals.length} CRITICAL, ${highs.length} HIGH, ${mediumsLows.length} MEDIUM/LOW) · **Reviewer passes:** ${completedPasses}/${reviewItems.length} completed${finalFindings.some((f) => f.disproveFailed) ? ` · ⚠ ${finalFindings.filter((f) => f.disproveFailed).length} finding(s) disprove-unverified (surfaced fail-open)` : ''}
 ${fixResult ? `**Autopilot:** ${fixResult.committed ? `committed ${fixResult.commitSha?.slice(0, 8)}, re-verify ${fixResult.reverify}` : `no commit (${fixResult.commitRefused ?? 'see notes'})`}${fixResult.issueUrl ? ` · tracking issue ${fixResult.issueUrl}` : ''}` : '**Autopilot:** off'}
 
 ## CRITICAL

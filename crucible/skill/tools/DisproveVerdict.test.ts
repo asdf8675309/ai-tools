@@ -230,3 +230,29 @@ describe('cross-vendor confidence is actually read (HIGH)', () => {
     expect(r.verdict).toBe('DISPROVEN_EVIDENCE');
   });
 });
+
+// ── Crucible round 2 findings ───────────────────────────────────────────────
+
+describe('a bare filename is not evidence the code was read (round 2, HIGH ×3)', () => {
+  test('a citation with no line number does NOT resolve', () => {
+    expect(resolveCitation([{ path: 'src/real.ts' }], ROOT)).toBe(false);
+  });
+  // NEGATIVE CONTROL: with a line, it still resolves.
+  test('the same file WITH a line still resolves', () => {
+    expect(resolveCitation([{ path: 'src/real.ts', line: 3 }], ROOT)).toBe(true);
+  });
+  test('a HIGH kill citing a file but no line is downgraded', () => {
+    const r = v({ disproven: true, confidence_after_check: 95, reason: 'guarded in src/real.ts' });
+    expect(r.verdict).toBe('CANNOT_VERIFY');
+  });
+});
+
+describe('trailing newline does not invent a final line (round 2, MEDIUM)', () => {
+  // src/real.ts is "a\nb\nc\nd\ne\n" — five real lines, split() reports six.
+  test('line 5 (the last real line) resolves', () => {
+    expect(resolveCitation([{ path: 'src/real.ts', line: 5 }], ROOT)).toBe(true);
+  });
+  test('line 6 (the phantom from the trailing newline) does NOT resolve', () => {
+    expect(resolveCitation([{ path: 'src/real.ts', line: 6 }], ROOT)).toBe(false);
+  });
+});

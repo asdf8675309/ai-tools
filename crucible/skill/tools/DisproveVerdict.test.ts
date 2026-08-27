@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  contains,
   extractCitations,
   isOutOfContract,
   resolveCitation,
@@ -142,5 +143,90 @@ describe('unrecognized shapes fail open', () => {
     const r = v({ confidence_after_check: 90, reason: 'no disproven field at all' });
     expect(r.verdict).toBe('AGREE');
     expect(survives(r)).toBe(true);
+  });
+});
+
+// ── Crucible round 1 findings, each reproduced before it was fixed ──────────
+
+describe('citation containment (CRITICAL — found by Crucible, reproduced)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'contain-'));
+  const croot = join(base, 'repo');
+  const evil = join(base, 'repo-evil');
+  mkdirSync(join(croot, 'src'), { recursive: true });
+  mkdirSync(evil, { recursive: true });
+  writeFileSync(join(croot, 'src/ok.ts'), 'a\nb\nc\n');
+  writeFileSync(join(evil, 'secret.ts'), 'a\nb\nc\n');
+
+  test('a sibling dir extending the root name does NOT satisfy containment', () => {
+    // `${root}-evil`.startsWith(root) is true; path-segment containment is not.
+    expect(resolveCitation([{ path: '../repo-evil/secret.ts', line: 2 }], croot)).toBe(false);
+  });
+
+  // NEGATIVE CONTROL: a genuine in-tree citation must still resolve, or the
+  // fix has simply disabled citations entirely.
+  test('a real in-tree file still resolves', () => {
+    expect(resolveCitation([{ path: 'src/ok.ts', line: 2 }], croot)).toBe(true);
+  });
+
+  test('contains() is segment-aware in both directions', () => {
+    expect(contains('/a/repo', '/a/repo/x.ts')).toBe(true);
+    expect(contains('/a/repo', '/a/repo-evil/x.ts')).toBe(false);
+    expect(contains('/a/repo', '/a/other/x.ts')).toBe(false);
+  });
+});
+
+describe('non-code files are not code evidence (HIGH)', () => {
+  test('a markdown or yaml citation is not extracted as a code citation', () => {
+    expect(extractCitations('documented in README.md')).toEqual([]);
+    expect(extractCitations('see config.yaml:3')).toEqual([]);
+  });
+  test('a real source citation still extracts', () => {
+    expect(extractCitations('guarded at src/a.ts:5')).toEqual([{ path: 'src/a.ts', line: 5 }]);
+  });
+});
+
+describe('the gate fails CLOSED on misconfiguration (HIGH)', () => {
+  test('an unrecognized min-severity requires a citation rather than disabling the gate', () => {
+    const r = resolveVerdict(
+      { id: 'X', disproven: true, confidence_after_check: 95, reason: 'no citation' },
+      { repoRoot: ROOT, floor: 80, requireCitationMinSeverity: 'BOGUS', severity: 'HIGH' },
+    );
+    expect(r.verdict).toBe('CANNOT_VERIFY');
+  });
+
+  test('a non-finite floor falls back to 80 instead of disabling confidence checks', () => {
+    const r = resolveVerdict(
+      { id: 'X', disproven: true, confidence_after_check: 15, reason: 'fine at src/real.ts:1' },
+      { repoRoot: ROOT, floor: Number.NaN, requireCitationMinSeverity: 'HIGH', severity: 'HIGH' },
+    );
+    expect(survives(r)).toBe(true);
+  });
+});
+
+describe('cross-vendor confidence is actually read (HIGH)', () => {
+  test('an agreeing cross-vendor kill below the floor cannot land', () => {
+    const r = resolveVerdict(
+      {
+        id: 'X', disproven: true, confidence_after_check: 95,
+        disproven_cross_vendor: true, confidence_cross_vendor: 10,
+        reason: 'guarded at src/real.ts:1',
+      },
+      { repoRoot: ROOT, floor: 80, requireCitationMinSeverity: 'HIGH', severity: 'HIGH' },
+    );
+    expect(survives(r)).toBe(true);
+    expect(r.downgradeReason).toContain('cross-vendor kill');
+  });
+
+  // NEGATIVE CONTROL: two confident vendors agreeing, with a citation, still kills.
+  test('two confident agreeing vendors with a real citation still kill', () => {
+    const r = resolveVerdict(
+      {
+        id: 'X', disproven: true, confidence_after_check: 95,
+        disproven_cross_vendor: true, confidence_cross_vendor: 92,
+        reason: 'guarded at src/real.ts:1',
+      },
+      { repoRoot: ROOT, floor: 80, requireCitationMinSeverity: 'HIGH', severity: 'HIGH' },
+    );
+    expect(r.verdict).toBe('DISPROVEN_EVIDENCE');
   });
 });

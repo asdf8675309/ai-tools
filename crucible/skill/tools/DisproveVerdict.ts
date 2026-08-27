@@ -18,8 +18,8 @@
  * anything unrecognized resolves to AGREE — surface, never drop.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 export type Verdict = 'AGREE' | 'DISPROVEN_EVIDENCE' | 'CANNOT_VERIFY';
 
@@ -66,7 +66,9 @@ export interface ResolvedVerdict {
   downgradeReason?: string;
 }
 
-const CITATION = /([\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|sql|md|ya?ml|json|sh|toml|rs|go|java|rb))(?::(\d+))?/g;
+// Only real source extensions. A citation requirement satisfied by README.md
+// or a yaml file is not evidence that the code was read.
+const CITATION = /([\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|sql|sh|rs|go|java|rb|c|h|cpp|cs|php|swift|kt|scala|sc))(?::(\d+))?/g;
 
 /**
  * A confidence in (0,1] is out of contract. The field is documented 0-100, so
@@ -91,20 +93,51 @@ export function extractCitations(reason: string | null | undefined): Array<{ pat
   return out;
 }
 
+/**
+ * Path-segment-aware containment. `startsWith` is not sufficient: for root
+ * `/a/repo`, the string `/a/repo-evil/x.ts` starts with it but is outside it.
+ */
+export function contains(root: string, candidate: string): boolean {
+  const r = resolve(root);
+  const c = resolve(candidate);
+  if (c === r) return true;
+  const rel = relative(r, c);
+  return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel) && !rel.startsWith(`..${sep}`);
+}
+
 /** True when at least one citation names a file that exists, at a line in range. */
 export function resolveCitation(
   citations: Array<{ path: string; line?: number }>,
   repoRoot: string,
 ): boolean {
-  const root = resolve(repoRoot);
+  // Canonicalize the root too. On macOS `tmpdir()` is /var/... which realpath
+  // resolves to /private/var/..., so comparing a realpath'd candidate against a
+  // raw root rejects every legitimate citation. Caught by the negative controls.
+  let root: string;
+  try {
+    root = realpathSync(resolve(repoRoot));
+  } catch {
+    root = resolve(repoRoot);
+  }
   for (const c of citations) {
     const abs = isAbsolute(c.path) ? c.path : resolve(root, c.path);
-    // Never follow a citation out of the tree under review.
-    if (!abs.startsWith(root)) continue;
+    // Containment must be path-segment-aware, not a string prefix: a sibling
+    // directory whose name EXTENDS the root ("<root>-evil") satisfies
+    // startsWith() and escapes the tree. Reproduced before this fix.
+    if (!contains(root, abs)) continue;
     if (!existsSync(abs)) continue;
+    // Resolve symlinks and re-check. existsSync/statSync both follow links, so
+    // a link inside the tree pointing outside it would otherwise pass.
+    let real: string;
+    try {
+      real = realpathSync(abs);
+    } catch {
+      continue;
+    }
+    if (!contains(root, real)) continue;
     let st;
     try {
-      st = statSync(abs);
+      st = statSync(real);
     } catch {
       continue;
     }
@@ -112,7 +145,7 @@ export function resolveCitation(
     if (c.line === undefined) return true;
     if (c.line < 1) continue;
     try {
-      const lines = readFileSync(abs, 'utf8').split('\n').length;
+      const lines = readFileSync(real, 'utf8').split('\n').length;
       if (c.line <= lines) return true;
     } catch {
       continue;
@@ -121,14 +154,28 @@ export function resolveCitation(
   return false;
 }
 
+/**
+ * Fails CLOSED. An unrecognized severity or a misconfigured threshold used to
+ * return false, which silently disabled the evidence gate for every candidate —
+ * a config typo turning off a security control with no error. Unknown now means
+ * "require the citation".
+ */
 function needsCitation(severity: string | undefined, min: string): boolean {
   const s = SEVERITY_RANK[(severity ?? '').toUpperCase()];
   const m = SEVERITY_RANK[(min ?? '').toUpperCase()];
-  if (s === undefined || m === undefined) return false;
+  if (m === undefined) return true;
+  if (s === undefined) return true;
   return s >= m;
 }
 
 export function resolveVerdict(raw: RawVerdict, opts: ResolveOptions): ResolvedVerdict {
+  // A NaN/Infinity/missing floor makes every `< floor` comparison false and
+  // quietly disables the confidence gate. Fall back to the documented default.
+  const floor =
+    typeof opts.floor === 'number' && Number.isFinite(opts.floor) && opts.floor >= 0
+      ? opts.floor
+      : 80;
+  opts = { ...opts, floor };
   const base = { id: raw.id, reason: raw.reason ?? '', disagreement: false };
   const cannot = (why: string): ResolvedVerdict => ({
     ...base,
@@ -172,6 +219,28 @@ export function resolveVerdict(raw: RawVerdict, opts: ResolveOptions): ResolvedV
 
   // 4. A kill.
   if (raw.disproven === true) {
+    // When a second vendor agreed, its confidence must clear the bar too. It
+    // was previously collected and never read, so a cross-vendor kill at
+    // confidence 10 rode in on the primary's 95.
+    // Only when a cross-vendor confidence was actually returned. An absent one
+    // means the augmentation did not report, and augmentation never blocks —
+    // fall back to the primary verdict alone.
+    if (
+      raw.disproven_cross_vendor === true &&
+      raw.confidence_cross_vendor != null &&
+      isOutOfContract(raw.confidence_cross_vendor)
+    ) {
+      return cannot('cross-vendor verdict returned an out-of-contract confidence');
+    }
+    if (
+      raw.disproven_cross_vendor === true &&
+      typeof raw.confidence_cross_vendor === 'number' &&
+      raw.confidence_cross_vendor < opts.floor
+    ) {
+      return cannot(
+        `cross-vendor kill at confidence ${raw.confidence_cross_vendor}, below floor ${opts.floor}`,
+      );
+    }
     // A kill issued below the floor is not confident enough to delete anything.
     if (confidence < opts.floor) {
       return cannot(`kill verdict issued at confidence ${confidence}, below floor ${opts.floor}`);

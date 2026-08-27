@@ -91,6 +91,27 @@ describe('the disprove contract no longer contradicts itself', () => {
   });
 });
 
+describe('the workflow does not simply trust the agent (Crucible round 1, HIGH)', () => {
+  // A workflow script has no filesystem access, so it cannot re-run
+  // DisproveVerdict.ts to check the agent's work. It can refuse a payload that
+  // contradicts itself. STRUCTURAL ONLY: this proves the cross-check is
+  // present, never that it behaves — that logic is not unit-testable without
+  // executing the workflow, and is deliberately recorded as unverified.
+  test('a kill only counts when the resolver summary corroborates the array', () => {
+    expect(workflowCode).toContain('summaryConsistent');
+    const killed = workflowCode.match(/const killed\s*=.*/)?.[0] ?? '';
+    expect(killed).toContain('summaryConsistent');
+  });
+
+  test('every interpolation reaching the disprove shell command is quoted', () => {
+    const line = workflowCode.split('\n').find((l) => l.includes('DisproveVerdict.ts') && l.includes('--floor')) ?? '';
+    expect(line).toBeTruthy();
+    // Bare ${...} outside double quotes is what let repo-controlled config text
+    // reach the shell unquoted.
+    expect(line).not.toMatch(/(?<!")\$\{(CONFIDENCE_FLOOR|REQUIRE_CITATION_MIN_SEVERITY|REPO_ROOT_SH)\}(?!")/);
+  });
+});
+
 describe('the parity list itself exists', () => {
   test('the description points at a section that is really there', () => {
     expect(workflow).toContain('Parity with FullReview.md');

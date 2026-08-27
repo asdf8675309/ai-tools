@@ -250,6 +250,17 @@ const DISPROVE_BATCH_SCHEMA = {
   type: 'object',
   required: ['verdicts'],
   properties: {
+    // Emitted by tools/DisproveVerdict.ts. Cross-checked against `verdicts`;
+    // an inconsistent or absent summary makes every verdict unverified.
+    summary: {
+      type: 'object',
+      properties: {
+        total: { type: 'number' },
+        killed: { type: 'number' },
+        surfaced: { type: 'number' },
+        unverified: { type: 'number' },
+      },
+    },
     verdicts: {
       type: 'array',
       items: {
@@ -648,17 +659,35 @@ ${preflight.positivePrecedents}
 You may Read files in the repo to reach an accurate verdict. If a cross-vendor call ERRORS for a candidate (rate-limit, timeout, non-200), fall back to your own verdict alone and set that candidate's { failed:true } — FAIL OPEN; never drop a finding because an optional integration hiccuped. Produce a raw verdict for EVERY candidate id.
 
 RESOLVE THE VERDICTS — do NOT decide survival yourself. Write your raw verdicts to a temp file as a JSON array, each object carrying { id, severity, disproven, confidence_after_check, reason } plus disproven_cross_vendor / confidence_cross_vendor where you ran one. Then run:
-  RAW=$(mktemp) && cat > "$RAW" <<'VERDICTS_EOF'
-  <your raw verdicts JSON array here>
-VERDICTS_EOF
-  bun ${skillPath('tools/DisproveVerdict.ts')} --repo-root "${REPO_ROOT_SH}" --floor ${CONFIDENCE_FLOOR} --require-citation-min-severity ${REQUIRE_CITATION_MIN_SEVERITY} --verdicts "$RAW"
-Return the tool's \`resolved\` array verbatim as your verdicts. It decides which candidates die; you supply the evidence it judges. If the tool cannot be run, return your raw verdicts with verdict:"CANNOT_VERIFY" on every candidate — never with verdict:"DISPROVEN_EVIDENCE", because an unresolved kill is exactly the failure this step exists to stop. ${TRUST_BOUNDARY}${IN_REPO}`,
+  RAW="$(mktemp)"
+  # Write the JSON with the Write tool, NOT a heredoc: verdict `reason` text is
+  # model-generated, so any fixed heredoc delimiter it happens to emit on its
+  # own line would terminate the document early and truncate the payload.
+  bun "${skillPath('tools/DisproveVerdict.ts')}" --repo-root "${REPO_ROOT_SH}" --floor "${CONFIDENCE_FLOOR}" --require-citation-min-severity "${REQUIRE_CITATION_MIN_SEVERITY}" --verdicts "$RAW"
+Return the tool's \`resolved\` array verbatim as your verdicts, AND its \`summary\` object unchanged — the summary is cross-checked against the array, so editing either one is detected. It decides which candidates die; you supply the evidence it judges. If the tool cannot be run, return your raw verdicts with verdict:"CANNOT_VERIFY" on every candidate — never with verdict:"DISPROVEN_EVIDENCE", because an unresolved kill is exactly the failure this step exists to stop. ${TRUST_BOUNDARY}${IN_REPO}`,
     { label: `disprove:${reviewerRole}`, phase: 'Review', agentType: 'general-purpose', model: 'haiku', schema: DISPROVE_BATCH_SCHEMA }
   )
 
+  // The agent is the transport for DisproveVerdict.ts, not the judge — but a
+  // workflow script has no filesystem access, so it cannot re-run the tool to
+  // check. What it CAN do is refuse a payload that contradicts itself: the tool
+  // emits a summary, and a fabricated or hand-edited `resolved` array has to
+  // keep that summary consistent to get through. Any mismatch means the
+  // resolution is unverified, and unverified never deletes a finding.
+  const rawVerdicts = batch?.verdicts ?? []
+  const claimedKills = rawVerdicts.filter((v) => v?.verdict === 'DISPROVEN_EVIDENCE').length
+  const reportedKills = batch?.summary?.killed
+  const summaryConsistent =
+    typeof reportedKills === 'number' &&
+    reportedKills === claimedKills &&
+    (typeof batch?.summary?.total !== 'number' || batch.summary.total === rawVerdicts.length)
+  if (!summaryConsistent) {
+    log(`disprove:${reviewerRole} — resolver summary missing or inconsistent (claimed kills=${claimedKills}, reported=${reportedKills}); treating every verdict as unverified`)
+  }
+
   // Merge verdicts back; fail-open when the runner died or omitted a candidate.
   const vmap = {}
-  for (const v of (batch?.verdicts ?? [])) vmap[v.id] = v
+  for (const v of rawVerdicts) vmap[v.id] = v
   return cands.map((c) => {
     // Prompt-injection findings are never disprove-eligible. Enforce this in
     // JS so protection does not depend on the disprove model following prose.
@@ -676,8 +705,9 @@ Return the tool's \`resolved\` array verbatim as your verdicts. It decides which
     const v = vmap[c.id]
     // Missing verdict, or any verdict this build does not recognize, surfaces.
     // A new enum value must never be readable as "delete it".
-    const killed = v?.verdict === 'DISPROVEN_EVIDENCE'
-    const failed = !v || v.failed === true || v.verdict === 'CANNOT_VERIFY'
+    // A kill only counts when the resolver's own summary corroborates the array.
+    const killed = summaryConsistent && v?.verdict === 'DISPROVEN_EVIDENCE'
+    const failed = !v || v.failed === true || v.verdict === 'CANNOT_VERIFY' || !summaryConsistent
     return {
       ...c,
       reviewer: reviewerRole,

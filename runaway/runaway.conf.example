@@ -1,0 +1,85 @@
+# runaway configuration.
+#
+# Copy to $XDG_CONFIG_HOME/runaway/runaway.conf (or $HOME/.config/runaway/runaway.conf)
+# and edit. Every key below is optional; anything you leave out keeps the
+# built-in default shown here.
+#
+# This file is parsed, never sourced. Values are data — a command substitution
+# in one is a string, not a command. Unknown keys and malformed values are
+# rejected out loud rather than ignored: `runaway config` shows what is actually
+# in force, and the daemon logs every rejection at startup.
+#
+# Set any threshold to 0 to turn that rule off entirely.
+
+# ── the per-process cap ──────────────────────────────────────────────────────
+# Resident memory a single in-scope process may hold before it is asked to
+# leave. This is the rule that does the work, and it wants to be low.
+#
+# Pick a number no legitimate thing you run will ever reach — roughly a quarter
+# of your RAM is a good start (8 GB on a 32 GB Mac). Setting it near your
+# machine's capacity is the classic mistake: by the time a 30 GB process trips a
+# 28 GB cap the machine is already paging, and a watchdog competing for the CPU
+# it needs in order to act is a watchdog that does not act. Firing early is what
+# makes this work at all.
+max_rss_mb = 8192
+
+# ── the system tiers ─────────────────────────────────────────────────────────
+# Swap in use, in megabytes, past which the largest in-scope process is asked to
+# leave. Catches the case the per-process cap misses: four processes at 6 GB
+# each, none of them individually wrong.
+max_swap_mb = 4096
+
+# Free space on the volume macOS swaps onto, below which the largest in-scope
+# process is killed outright — no SIGTERM, no grace period. A boot volume that
+# fills is the failure that takes the whole machine down, and it is not worth
+# ten polite seconds.
+min_disk_free_mb = 10240
+
+# Where to measure that. Falls back to / if this path does not exist.
+vm_volume = /System/Volumes/VM
+
+# ── scope ────────────────────────────────────────────────────────────────────
+# runaway only ever signals a process that is (a) running as you and (b)
+# descended from a root. Everything else on your machine is off limits by
+# construction, including your browser and your editor.
+#
+# A root is a process whose program name matches root_pattern, whose full
+# command line matches root_cmdline_pattern, or that was started by
+# `runaway run`. Both patterns are extended regular expressions.
+#
+# The two defaults are the two shapes Claude Code installs as: the native binary
+# and the npm package running under node. Add your own with alternation:
+#   root_pattern = ^(claude|codex|aider)$
+root_pattern = ^claude$
+root_cmdline_pattern = claude-code/cli\.js
+
+# Never signal a process whose program name matches this, even in scope. Killing
+# the shell an agent is running a build in does not stop the build's runaway
+# child; it just costs you the output.
+never_pattern = ^-?(sh|bash|zsh|fish|dash|ksh)$|^(launchd|login|tmux|screen|ssh|sshd|sudo|su|runaway)$
+
+# Whether the root process itself — your agent — is exempt. Killing it ends the
+# session, so it is exempt by default. Set to 0 if you would rather lose the
+# session than the machine.
+protect_roots = 1
+
+# ── behaviour ────────────────────────────────────────────────────────────────
+# How often to look. Cheap: one ps, one sysctl, one df.
+interval_seconds = 5
+
+# Seconds between SIGTERM and SIGKILL. Long enough for a test runner to flush
+# its output, short enough to matter.
+grace_seconds = 10
+
+# Decide and log, signal nothing. Worth a week before you trust it.
+dry_run = 0
+
+# A macOS notification when something is killed. A process that vanishes without
+# explanation is worse than the crash it prevented.
+notify = 1
+
+# The heap cap `runaway run` puts in NODE_OPTIONS for anything it launches, in
+# megabytes. Unlike everything else in this file this is a real limit rather
+# than a reaction: V8 refuses the allocation and the process dies naming your
+# code. 0 to leave NODE_OPTIONS alone.
+node_max_old_space_mb = 4096

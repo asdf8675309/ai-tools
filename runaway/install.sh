@@ -143,8 +143,11 @@ printf '\n'
 
 bold "Staged."
 printf '\n'
-printf 'Look before you load it. This prints what it can see and what it would kill,\n'
-printf 'and changes nothing:\n\n'
+printf 'Look before you load it. Neither of these changes anything.\n\n'
+printf 'First — which probes this machine actually lets a non-root user read. A probe\n'
+printf 'that reads "unavailable" is a rule that will not fire:\n\n'
+printf '    %s probes\n\n' "$BIN_LINK"
+printf 'Then what it can see and what it would do right now:\n\n'
 printf '    %s status\n\n' "$BIN_LINK"
 printf 'Then, when the thresholds look right for your machine:\n\n'
 printf '    launchctl bootstrap gui/%s %s\n\n' "$(id -u)" "$PLIST"

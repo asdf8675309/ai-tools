@@ -41,12 +41,17 @@ max_rss_mb = 3000
 grace_seconds = 2
 notify = 0
 root_pattern = ^my-agent$
+pressure_action = kill
+pressure_scope = agents
+target_min_mb = 2048
 EOF
 rg_load_config
 eq 'a configured threshold replaces the default'   3000 "$max_rss_mb"
 eq 'so does a configured grace period'             2 "$grace_seconds"
 eq 'and a configured pattern'                      '^my-agent$' "$root_pattern"
-eq 'a key the file does not mention keeps its default' 4096 "$max_swap_mb"
+eq 'and each of the pressure knobs, which are the ones people will actually tune' \
+  'kill agents 2048' "$pressure_action $pressure_scope $target_min_mb"
+eq 'a key the file does not mention keeps its default' 8192 "$max_swap_mb"
 eq 'and the source is reported as the file, not as defaults' "$RUNAWAY_CONFIG" "$RG_CONFIG_SOURCE"
 
 printf 'interval_seconds = 0\n' >"$RUNAWAY_CONFIG"
@@ -57,7 +62,7 @@ printf 'bogus_key = 1\n' >"$RUNAWAY_CONFIG"
 rg_load_config 2>/dev/null
 eq 'a config with a rejected line is flagged so the daemon can warn at startup' 1 "$RG_CONFIG_ERRORS"
 
-# ── the scope registry ───────────────────────────────────────────────────────
+# ── the registries ──────────────────────────────────────────────────────────
 mkdir -p "$RG_ROOTS_DIR"
 : >"$RG_ROOTS_DIR/$$"
 : >"$RG_ROOTS_DIR/4194303"
@@ -106,10 +111,56 @@ eq 'and the guard does not sit out the whole grace period waiting for a corpse' 
   1 "$([ "$elapsed" -lt "$grace_seconds" ] && echo 1 || echo 0)"
 wait "$victim" 2>/dev/null
 
+# ── pause and resume ─────────────────────────────────────────────────────────
+# The pressure rule's default action. Reversible is the whole point: a pause
+# that cost nothing is undone when pressure clears, and the registry is what
+# makes `runaway ps` and `runaway resume` possible after the daemon restarts.
+mkdir -p "$RG_STOPPED_DIR"
+sleep 30 &
+victim=$!
+log="$(printf 'plan %d 9999999 STOP pressure:compressor /bin/sleep\n' "$victim" | rg_execute_plan 2>&1)"
+contains 'a pause is logged as what it is'  'SIGSTOP to pid' "$log"
+eq 'and the process is stopped, not dead' \
+  T "$(ps -o stat= -p "$victim" 2>/dev/null | cut -c1)"
+eq 'the pause is recorded so it can be undone later, or by a different process' \
+  1 "$([ -e "$RG_STOPPED_DIR/$victim" ] && echo 1 || echo 0)"
+
+log="$(printf 'plan %d 9999999 CONT pressure-cleared /bin/sleep\n' "$victim" | rg_execute_plan 2>&1)"
+contains 'a resume is logged too'          'SIGCONT to pid' "$log"
+eq 'and the record is cleared with it' \
+  0 "$([ -e "$RG_STOPPED_DIR/$victim" ] && echo 1 || echo 0)"
+eq 'the process is running again' \
+  1 "$(kill -0 "$victim" 2>/dev/null && echo 1 || echo 0)"
+kill -KILL "$victim" 2>/dev/null
+wait "$victim" 2>/dev/null
+
+# A stopped process cannot act on SIGTERM — it is not running, so it never
+# reaches its handler and the grace period expires against a process that was
+# never given the chance. Escalation has to wake it first. This is the bug the
+# escalation path had before it was tested.
+sleep 30 &
+victim=$!
+grace_seconds=3
+printf 'plan %d 9999999 STOP pressure:compressor /bin/sleep\n' "$victim" | rg_execute_plan >/dev/null 2>&1
+eq 'a paused process is genuinely stopped before the escalation runs' \
+  T "$(ps -o stat= -p "$victim" 2>/dev/null | cut -c1)"
+start=$SECONDS
+log="$(printf 'plan %d 9999999 TERM pressure-escalate /bin/sleep\n' "$victim" | rg_execute_plan 2>&1)"
+elapsed=$((SECONDS - start))
+eq 'escalating a paused process actually kills it rather than timing out' \
+  1 "$(kill -0 "$victim" 2>/dev/null && echo 0 || echo 1)"
+eq 'and it does not sit out the grace period first' \
+  1 "$([ "$elapsed" -lt "$grace_seconds" ] && echo 1 || echo 0)"
+lacks 'so no SIGKILL was needed' 'SIGKILL' "$log"
+eq 'and the pause record is gone with the process' \
+  0 "$([ -e "$RG_STOPPED_DIR/$victim" ] && echo 1 || echo 0)"
+wait "$victim" 2>/dev/null
+grace_seconds=2
+
 # ── a note is reported, never acted on ───────────────────────────────────────
-log="$(printf 'note 4194303 4000000 NONE swap-pressure /some/process\n' | rg_execute_plan 2>&1)"
-contains 'a tier that tripped with nothing in scope names what it saw' \
-  'swap-pressure tripped but nothing in scope' "$log"
+log="$(printf 'note 4194303 4000000 NONE swap-ceiling /some/process\n' | rg_execute_plan 2>&1)"
+contains 'a rule that tripped with nothing it may act on names what it saw' \
+  'swap-ceiling tripped, but nothing it may act on' "$log"
 contains 'and reports it in megabytes' '3906 MB' "$log"
 lacks 'and sends no signal' 'act:' "$log"
 
@@ -147,5 +198,44 @@ eq 'the -- separator is optional' 'ok' "$out"
 
 runaway run -- sh -c 'exit 42' >/dev/null 2>&1
 eq 'the wrapper execs, so the exit status is the commands own' 42 "$?"
+
+# ── ps and resume ────────────────────────────────────────────────────────────
+# The way out. A paused process with no way to find or undo it is worse than the
+# pressure that paused it.
+sleep 30 &
+victim=$!
+kill -STOP "$victim"
+printf '%s' "$(date '+%s')" >"$RG_STOPPED_DIR/$victim"
+out="$(runaway ps)"
+contains 'ps lists a paused process by pid'      "$victim" "$out"
+contains 'and tells you how to undo it'          'runaway resume' "$out"
+out="$(runaway resume "$victim")"
+contains 'resume says what it resumed'           "resumed $victim" "$out"
+eq 'the process is running again' \
+  1 "$(kill -0 "$victim" 2>/dev/null && echo 1 || echo 0)"
+eq 'and its record is gone' \
+  0 "$([ -e "$RG_STOPPED_DIR/$victim" ] && echo 1 || echo 0)"
+eq 'with nothing paused, ps says so rather than printing an empty table' \
+  'Nothing paused.' "$(runaway ps)"
+kill -KILL "$victim" 2>/dev/null
+wait "$victim" 2>/dev/null
+
+# Deliberately not restricted to the registry: if the daemon died between the
+# SIGSTOP and the write, the registry is the thing that is wrong, and refusing
+# would leave a stopped process with no way to say so.
+sleep 30 &
+victim=$!
+kill -STOP "$victim"
+out="$(runaway resume "$victim")"
+eq 'a process paused with no record can still be resumed' "resumed $victim" "$out"
+eq 'and it really is running' \
+  1 "$(kill -0 "$victim" 2>/dev/null && echo 1 || echo 0)"
+kill -KILL "$victim" 2>/dev/null
+wait "$victim" 2>/dev/null
+
+runaway resume 4194303 >/dev/null 2>&1
+eq 'resuming a pid that does not exist fails rather than reporting success' 1 "$?"
+runaway resume not-a-pid >/dev/null 2>&1
+eq 'and so does resuming something that is not a pid at all' 2 "$?"
 
 summary cli

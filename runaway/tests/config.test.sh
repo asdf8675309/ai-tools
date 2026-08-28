@@ -22,6 +22,18 @@ errs() { cat "$WORK/err"; }
 
 eq 'a plain assignment is passed through' \
   'max_rss_mb=6000' "$(conf 'max_rss_mb = 6000')"
+eq 'every threshold the pressure rule reads is a known key' \
+  'max_pressure_level=4
+max_compressed_pct=70
+max_swapout_mb_per_sec=200
+pressure_sustain_seconds=20
+pressure_escalate_seconds=120
+target_min_mb=1024' "$(conf 'max_pressure_level = 4
+max_compressed_pct = 70
+max_swapout_mb_per_sec = 200
+pressure_sustain_seconds = 20
+pressure_escalate_seconds = 120
+target_min_mb = 1024')"
 eq 'whitespace around the key and value is not part of either' \
   'max_rss_mb=6000' "$(conf '   max_rss_mb   =   6000   ')"
 eq 'comments and blank lines are skipped' \
@@ -47,6 +59,19 @@ eq 'a negative threshold is rejected — there is no such size' '' "$(conf 'max_
 eq 'a fractional threshold is rejected rather than truncated' '' "$(conf 'max_swap_mb = 4.5')"
 eq 'a flag that is not 0 or 1 is rejected' '' "$(conf 'dry_run = yes')"
 contains 'and says so' 'must be 0 or 1' "$(errs)"
+
+# The two enums. A typo here is the difference between "watches everything you
+# own" and "watches nothing", so neither is allowed to fall through to a default.
+eq 'scope must be one of the two things it can be' '' "$(conf 'scope = everything')"
+contains 'and the rejection says which two' 'must be agents or user' "$(errs)"
+eq 'scope = user is accepted'   'scope=user'   "$(conf 'scope = user')"
+eq 'scope = agents is accepted' 'scope=agents' "$(conf 'scope = agents')"
+eq 'pressure_scope is validated the same way' '' "$(conf 'pressure_scope = wide')"
+
+eq 'pressure_action must be one of the three signals it knows' '' "$(conf 'pressure_action = pause')"
+contains 'and the rejection lists them' 'must be stop, term or kill' "$(errs)"
+eq 'pressure_action = stop is accepted' 'pressure_action=stop' "$(conf 'pressure_action = stop')"
+eq 'pressure_action = kill is accepted' 'pressure_action=kill' "$(conf 'pressure_action = kill')"
 
 eq 'a line with no separator is rejected' '' "$(conf 'max_rss_mb 6000')"
 contains 'and says what a line should look like' 'not a key = value line' "$(errs)"
@@ -99,5 +124,16 @@ eq 'available megabytes come from the single -P data line' \
 eq 'a df that printed only a header reads as unavailable' \
   -1 "$(printf 'Filesystem 1048576-blocks Used Available Capacity Mounted on\n' | rg_df_free_mb)"
 eq 'a df that failed entirely reads as unavailable' -1 "$(printf '' | rg_df_free_mb)"
+
+# ── the shipped example ──────────────────────────────────────────────────────
+# runaway.conf.example is both the documentation and the file install.sh copies
+# into place. A key renamed in the code and not in the example ships a config
+# that the tool rejects on the user's first run.
+EXAMPLE="$HERE/../runaway.conf.example"
+rejected="$(rg_parse_conf <"$EXAMPLE" 2>&1 >/dev/null)"
+eq 'every key in the shipped example config is one the parser knows' '' "$rejected"
+eq 'and it sets a value for every documented key, not just some' \
+  "$(rg_parse_conf <"$EXAMPLE" 2>/dev/null | wc -l | tr -d ' ')" \
+  "$(printf '%s %s %s %s %s %s\n' $RG_CONF_UINT_KEYS $RG_CONF_BOOL_KEYS $RG_CONF_RE_KEYS $RG_CONF_STR_KEYS $RG_CONF_ENUM_SCOPE_KEYS $RG_CONF_ENUM_ACTION_KEYS | wc -w | tr -d ' ')"
 
 summary config

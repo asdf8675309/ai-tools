@@ -1,0 +1,183 @@
+# runaway configuration.
+#
+# Copy to $XDG_CONFIG_HOME/runaway/runaway.conf (or $HOME/.config/runaway/runaway.conf)
+# and edit. Every key below is optional; anything you leave out keeps the
+# built-in default shown here.
+#
+# This file is parsed, never sourced. Values are data — a command substitution
+# in one is a string, not a command. Unknown keys and malformed values are
+# rejected out loud rather than ignored: `runaway config` shows what is actually
+# in force, and the daemon logs every rejection at startup.
+#
+# Set any threshold to 0 to turn that rule off.
+#
+# Start with `runaway probes`. It prints every reading below as it is on YOUR
+# machine and says which ones it could not read — a rule reading "unavailable"
+# is a rule that will not fire, and there is no point tuning it.
+
+# ═══ the system-pressure rule ════════════════════════════════════════════════
+#
+# The rule that keeps you out of the "your system has run out of application
+# memory" panel. Three independent inputs, any one of which trips it. There are
+# three because they fail in different ways, and each is the others' fallback.
+
+# 1. The kernel's own pressure level: 1 normal, 2 warn, 4 critical. The same
+#    judgment macOS acts on itself, so it needs no calibration from you. Acting
+#    at 2 (warn) is the point — critical is where the panel lives, and by then
+#    you are late.
+#
+#    Read by name from kern.memorystatus_vm_pressure_level, which is readable
+#    without root but is flagged hidden on release builds: it does NOT appear in
+#    `sysctl -a`. Do not conclude it is missing from its absence there; use
+#    `runaway probes`.
+max_pressure_level = 2
+
+# 2. What share of RAM the compressor is holding, as a percent — the "Pages
+#    occupied by compressor" line of vm_stat over hw.memsize_usable. Always
+#    computable, but the threshold is a number a person has to pick. Past about
+#    60% everything compressible has been compressed and the next stop is swap,
+#    and swap running low is half of what raises the panel.
+max_compressed_pct = 60
+
+# 3. Megabytes per second being written to swap. This is "the Mac is swapping
+#    heavily" measured directly, and it is the earliest of the three — but the
+#    right number depends on your disk and your workload, so it ships OFF.
+#    To calibrate: run `runaway watch --dry-run`, do the heaviest normal thing
+#    you do, and read the rate out of `runaway probes` while it runs. Set this
+#    to comfortably above that.
+max_swapout_mb_per_sec = 0
+
+# How long the machine has to stay in trouble before anything happens. A build
+# starting up spikes; a leak does not stop.
+pressure_sustain_seconds = 10
+
+# What to do about it. `stop` sends SIGSTOP: the process halts between
+# instructions and stops allocating, nothing is lost, and it is undone with
+# `runaway resume`. Note that a pause frees nothing immediately — the pages are
+# still held, they just stop being referenced, and so become candidates for the
+# compressor over the following seconds. Relief is real but it lags, which is
+# why this rule is set to fire at warn rather than critical.
+# That is the default because the pressure rule is allowed to reach outside your
+# agent (see pressure_scope), and reaching wide with a kill is not a trade worth
+# making. `term` and `kill` are the destructive alternatives.
+pressure_action = stop
+
+# A pause does not free the paused process's memory — it only stops it growing.
+# So if pressure is still there this many seconds later, pausing did not solve
+# it, and the process is asked to leave and then killed. 0 to never escalate.
+pressure_escalate_seconds = 90
+
+# If pressure clears and stays clear, put back everything runaway paused. A
+# pause during a spike that passed cost nothing and should not be permanent.
+resume_on_recovery = 1
+
+# ═══ the per-process cap ═════════════════════════════════════════════════════
+#
+# Resident memory a single in-scope process may hold before it is asked to
+# leave, then killed. Independent of system pressure: this is the "no process I
+# run should ever be this big" rule.
+#
+# Pick a number nothing you run legitimately reaches — roughly a quarter of your
+# RAM is a good start (8 GB on a 32 GB Mac). Setting it near your machine's
+# capacity is the classic mistake: by the time a 30 GB process trips a 28 GB cap
+# the machine is already paging, and a watchdog competing for the CPU it needs
+# in order to act is a watchdog that does not act.
+max_rss_mb = 8192
+
+# ═══ absolute backstops ══════════════════════════════════════════════════════
+
+# Swap in use, in megabytes, past which the largest in-scope process is asked to
+# leave. A blunt ceiling under the pressure rule, for the case where every
+# pressure probe on your machine turned out to be unreadable.
+#
+# Read from vm.swapusage. Note that its `free` figure is space inside the swap
+# files macOS has currently allocated, and macOS grows and shrinks them — so
+# `free` near zero is ordinary and is not the danger signal it looks like. Used
+# is the figure worth a threshold.
+max_swap_mb = 8192
+
+# Free space on the volume macOS swaps onto, below which the largest in-scope
+# process is killed outright — no SIGTERM, no grace period, no pause.
+#
+# Free disk matters here for one specific reason: it is what lets macOS grow the
+# swap files. Once it cannot, the swapper is low on space, and that is one of
+# the two conditions that raises the out-of-memory panel. Not worth ten polite
+# seconds.
+min_disk_free_mb = 10240
+
+# Where to measure that. Falls back to / if this path does not exist.
+vm_volume = /System/Volumes/VM
+
+# ═══ scope ═══════════════════════════════════════════════════════════════════
+#
+# runaway only ever signals a process running as YOU. Within that, scope decides
+# how far it reaches:
+#
+#   agents  processes descended from a root — your coding agent, or anything
+#           started by `runaway run`
+#   user    every process you own
+#
+# There are two settings because the two kinds of action are different. The
+# destructive rules — the per-process cap, the swap ceiling, the disk floor —
+# stay narrow. The pressure rule's default action is a reversible pause, so it
+# is allowed to look at everything you own, because the thing filling your swap
+# is very often not something your agent started.
+#
+# If the freeze happens when no agent is running, set `scope = user` too. Read
+# never_pattern below first.
+scope = agents
+pressure_scope = user
+
+# No target smaller than this, in megabytes. Once the real offenders are
+# protected or already paused, "the largest process I may act on" is whatever
+# tiny thing is left — and pausing a 1 MB helper to relieve memory pressure is
+# not a smaller version of the right action, it is the wrong action.
+target_min_mb = 512
+
+# A root is a process whose program name matches root_pattern, whose full
+# command line matches root_cmdline_pattern, or that was started by
+# `runaway run`. Both are extended regular expressions matched against processes
+# you own. The two defaults cover the common agent CLIs and the shape Claude
+# Code takes when installed as an npm package running under node.
+root_pattern = ^(claude|codex|aider|goose|opencode|cursor-agent)$
+root_cmdline_pattern = claude-code/cli\.js
+
+# Whether the root process itself — your agent — is exempt. Killing it ends the
+# session, so it is exempt by default. Set to 0 if you would rather lose the
+# session than the machine.
+protect_roots = 1
+
+# Never signalled, in any scope, at any pressure. This is the list that makes
+# `pressure_scope = user` safe: widening the scope does not widen what may be
+# touched. Two groups — things whose death breaks the session or the desktop,
+# and things holding work you have not saved.
+#
+# Note what is deliberately NOT here: browsers, and every runtime. A browser is
+# the single most common cause of this on a Mac and it restores its tabs; a node
+# or python process is the thing you installed this for.
+never_pattern = ^-?(sh|bash|zsh|fish|dash|ksh)$|^(launchd|login|tmux|screen|ssh|sshd|sudo|su|runaway)$|^(Finder|Dock|SystemUIServer|WindowServer|loginwindow|ControlCenter|NotificationCenter|Spotlight|coreaudiod|bluetoothd|cfprefsd|distnoted|UserEventAgent|securityd|opendirectoryd)$|^(mds|mds_stores|mdworker.*|mdwrite.*)$|^(Terminal|iTerm2|Xcode|Code|Code Helper.*|Electron|nvim|vim|emacs|git)$
+
+# ═══ behaviour ═══════════════════════════════════════════════════════════════
+
+# How often to look. Cheap: one ps, three sysctls, one vm_stat, one df, two awk
+# passes. Also the resolution of the swapout rate and of every sustain timer.
+interval_seconds = 5
+
+# Seconds between SIGTERM and SIGKILL. Long enough for a test runner to flush
+# its output, short enough to matter.
+grace_seconds = 10
+
+# Decide and log, signal nothing. Worth a week before you trust it, and the only
+# way to calibrate max_swapout_mb_per_sec.
+dry_run = 0
+
+# A macOS notification when something is paused or killed. A process that
+# vanishes — or freezes — without explanation is worse than the crash it
+# prevented. The pause notification tells you the resume command.
+notify = 1
+
+# The heap cap `runaway run` puts in NODE_OPTIONS for anything it launches, in
+# megabytes. Unlike everything else in this file this is a real limit rather
+# than a reaction: V8 refuses the allocation and the process dies naming your
+# code. 0 to leave NODE_OPTIONS alone.
+node_max_old_space_mb = 4096

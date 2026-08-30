@@ -1,0 +1,10 @@
+{
+  "name": "runaway",
+  "version": "1.0.0",
+  "description": "A memory watchdog for the processes a coding agent spawns: a per-process cap, a swap ceiling, and a disk floor, enforced by a LaunchAgent that acts before the machine is too busy to act",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "bash tests/run.sh"
+  }
+}

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for runaway. install.sh fills the placeholders below and stages a
+  copy in ~/Library/LaunchAgents; it does not load it. The placeholders are here
+  rather than real paths because this file is in a public repository and the
+  real ones name your home directory.
+
+  A LaunchAgent, not a LaunchDaemon: it runs as you, so it can only ever signal
+  your own processes. A root daemon could set itself a negative nice value and
+  would survive pressure marginally better, but a root process whose job is
+  sending SIGKILL is a larger blast radius than the problem it solves.
+
+  ProcessType Interactive is the important key. It tells launchd this job is
+  part of a responsive user experience, so it is exempt from the CPU and I/O
+  throttling applied to background work — which is exactly the throttling that
+  would keep a watchdog from being scheduled at the moment it is needed.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__PROGRAM__</string>
+    <string>watch</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Baked in because launchd does not inherit the XDG variables from your
+         shell. Without these the daemon would read a different config file than
+         `runaway config` prints, which is a debugging afternoon nobody needs. -->
+    <key>RUNAWAY_CONFIG</key>
+    <string>__CONFIG__</string>
+    <key>RUNAWAY_STATE_DIR</key>
+    <string>__STATE_DIR__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart if it dies. A watchdog that is not running is worse than no
+       watchdog, because you think you have one. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>LowPriorityIO</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+</dict>
+</plist>

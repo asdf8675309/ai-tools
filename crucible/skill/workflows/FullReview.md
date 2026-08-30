@@ -504,11 +504,20 @@ Nothing else persists disprove verdicts by default — this log is the only dura
 
 Apply filters in order. The disprove filter splits into two paths depending on whether cross-vendor disprove ran for a given candidate (4b).
 
-1. **Disprove filter (primary-only):** drop candidates where `disproven_primary == true` OR `confidence_primary < 80` (the floor is `thresholds.confidence_floor`). This is the whole filter for MEDIUM/LOW, and for everything when cross-vendor disprove is disabled (the default).
-2. **Disprove filter (cross-vendor, when it ran):** a candidate survives cleanly only when BOTH verdicts clear it — `disproven_primary == false AND confidence_primary >= floor AND disproven_cross_vendor == false AND confidence_cross_vendor >= floor`. Otherwise resolve by case:
-   - **Both agree it's disproven, or either confidence is below the floor** → drop it.
-   - **The two models split** (exactly one disproved it) → do NOT drop. The disagreement is itself a signal worth a human's attention — the finding **survives**, flagged `disagreement: true`, and routes to the Phase 6a vendor-disagreement group for human review.
-   - **Cross-vendor call failed entirely** (`disproven_cross_vendor` undefined) → fall back to the primary verdict alone; augmentation never blocks.
+1. **Disprove filter — resolve through the tool, do not adjudicate in prose.** Run `bun tools/DisproveVerdict.ts --repo-root <abs> --floor <thresholds.confidence_floor> --require-citation-min-severity <thresholds.require_citation_min_severity> --verdicts <file>` over the raw Phase 4 verdicts and use its `resolved` array. **A candidate leaves the pipeline only on `verdict: "DISPROVEN_EVIDENCE"`.** The truth table it applies, which `tools/DisproveVerdict.test.ts` pins for both editions:
+
+   | Raw verdict | Resolves to | Finding |
+   |---|---|---|
+   | `disproven: true`, confidence ≥ floor, citation resolves (or below `require_citation_min_severity`) | `DISPROVEN_EVIDENCE` | dropped |
+   | `disproven: true`, but cites no resolvable code at/above that severity | `CANNOT_VERIFY` | **survives**, flagged |
+   | `disproven: true`, confidence < floor | `CANNOT_VERIFY` | **survives**, flagged |
+   | `disproven: false`, confidence < floor | `CANNOT_VERIFY` | **survives**, flagged |
+   | confidence outside the documented 0–100 contract, or null | `CANNOT_VERIFY` | **survives**, flagged |
+   | the two vendors split | `AGREE` + `disagreement: true` | **survives**, human review |
+   | anything unrecognized | `AGREE` | **survives** |
+
+   Why the floor no longer drops on its own: measured over more than a thousand verdicts from real runs, most sub-floor verdicts said *keep* and were dropped by the floor, while the rest said *kill* and landed anyway because the boolean was never gated on confidence. Every one of those uncertain verdicts resolved the same way — the finding disappeared. The floor still marks uncertainty; it no longer decides survival by itself.
+2. **Cross-vendor split routing:** a candidate flagged `disagreement: true` goes to the Phase 6a vendor-disagreement group. Never fold it into a normal severity bucket, never auto-fix it. A **cross-vendor call that failed entirely** falls back to the primary verdict alone; augmentation never blocks.
 3. **Deny-list filter:** drop candidates matching any item in `references/DoNotReport.md`
 4. **Per-reviewer cap:** sort surviving findings per reviewer by `(impact × 1.0) − (effort × 0.5)`, keep the top `thresholds.per_reviewer_cap` (5 by default), append `+ N additional findings dropped (rank ≤ X)` if more were dropped
 

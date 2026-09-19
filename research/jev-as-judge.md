@@ -184,14 +184,13 @@ sampled.
   needs a deterministic fallback path.
 - **No rationale** makes a regression hard to diagnose after the fact. Log
   the full probability distribution, not just the winning label.
-- ~~**Network policy.** Allowlisting `api.typesafe.ai` is a prerequisite.~~
-  **Resolved, and it turned out not to be needed.** Jev is a first-class
-  Cloudflare Workers AI model (`typesafe/jev`), so the whole spike ran through
-  `POST /accounts/{id}/ai/run` with an existing Cloudflare token. No new vendor
-  account, no new key, no egress change. One detail costs an hour if missed:
-  the AI Gateway is engaged by the `cf-aig-gateway-id` **header**, not by
-  posting to a `gateway.ai.cloudflare.com` URL — that URL is an OpenAI-chat
-  shim which cannot express a `questions` payload at all.
+- **No vendor account is required to try it.** Jev is a first-class Cloudflare
+  Workers AI model (`typesafe/jev`), so a spike runs through
+  `POST /accounts/{id}/ai/run` on an existing Cloudflare token. One detail
+  costs an hour if missed: the AI Gateway is engaged by the
+  `cf-aig-gateway-id` **header**, not by posting to a
+  `gateway.ai.cloudflare.com` URL — that URL is an OpenAI-chat shim which
+  cannot express a `questions` payload at all.
 
 ---
 

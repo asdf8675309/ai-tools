@@ -1,0 +1,19 @@
+{
+  "name": "askjev",
+  "version": "1.0.0",
+  "description": "Puts a live open decision to TypeSafe's Jev (a calibrated-decision model) and reports back probabilities, not prose",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}

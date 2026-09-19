@@ -1,0 +1,19 @@
+{
+  "name": "jev-kit",
+  "version": "0.1.0",
+  "description": "Typed decision primitives for TypeSafe Jev, with a reproducible eval harness",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "smoke": "bun src/smoke.ts",
+    "claims:gen": "bun examples/unverified-claims/corpus-gen.ts --seed 42 > examples/unverified-claims/corpus.jsonl",
+    "claims:eval": "bun examples/unverified-claims/eval.ts",
+    "claims:sabotage": "bun examples/unverified-claims/sabotage.ts",
+    "findings:gen": "bun examples/review-findings/corpus-gen.ts --seed 42 > examples/review-findings/corpus.jsonl",
+    "findings:eval": "bun examples/review-findings/eval.ts",
+    "findings:sabotage": "bun examples/review-findings/sabotage.ts"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}

@@ -11,7 +11,8 @@
     "claims:sabotage": "bun examples/unverified-claims/sabotage.ts",
     "findings:gen": "bun examples/review-findings/corpus-gen.ts --seed 42 > examples/review-findings/corpus.jsonl",
     "findings:eval": "bun examples/review-findings/eval.ts",
-    "findings:sabotage": "bun examples/review-findings/sabotage.ts"
+    "findings:sabotage": "bun examples/review-findings/sabotage.ts",
+    "test": "bun test src/"
   },
   "devDependencies": {
     "bun-types": "latest"

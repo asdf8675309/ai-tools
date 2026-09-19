@@ -77,6 +77,8 @@ export interface DecideResult {
   usage?: { input_tokens?: number; output_tokens?: number };
   durationMs: number;
   error?: string;
+  /** Requested question keys that came back unanswered. Empty on a full response. */
+  missing?: string[];
   /** HTTP status when the failure was an HTTP one. 429 means throttled, and
    * carries a retry-after header worth honouring. */
   status?: number;
@@ -140,7 +142,12 @@ export async function decide(options: DecideOptions): Promise<DecideResult> {
     const inner = json.result?.result;
     if (!inner?.answers) return report({ ok: false, durationMs, error: 'no result.result.answers in response' });
 
-    return report({ ok: true, answers: inner.answers, usage: inner.usage, durationMs });
+    // A response carrying SOME of the requested answers still returns ok:true,
+    // because partial answers are usable. But the caller has to be able to tell:
+    // asking seven questions and receiving two should not look identical to
+    // receiving seven. `missing` names the keys that came back absent.
+    const missing = Object.keys(questions).filter((k) => !(k in inner.answers!));
+    return report({ ok: true, answers: inner.answers, usage: inner.usage, durationMs, missing });
   } catch (error) {
     const durationMs = Date.now() - started;
     return report({ ok: false, durationMs, error: error instanceof Error ? error.message : String(error) });

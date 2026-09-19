@@ -80,7 +80,11 @@ async function score(r: Row): Promise<void> {
       // max, never a mean: one confident disqualifier is enough, and averaging
       // seven heads buries the single head that fired.
       const gate = maxGate(res.answers, 1.01);
-      if (Number.isFinite(gate.value)) {
+      // `scored`, not `isFinite`: value starts at 0, so isFinite is ALWAYS true
+      // and a response carrying no usable noul would be recorded as a genuine
+      // score of 0 — a model failure entering the corpus as a confident "not a
+      // false positive".
+      if (gate.scored > 0) {
         scored.push({ ...r, score: gate.value, top: gate.top });
         return;
       }
@@ -103,6 +107,14 @@ for (let i = 0; i < rows.length; i += CONCURRENCY) {
 }
 
 if (failed) console.error(`\n${failed} rows failed to score`);
+// A headline number computed over a corpus that partly failed to score is not
+// a result for that corpus. Refuse rather than print something quotable.
+const lossRate = failed / rows.length;
+if (lossRate > 0.1) {
+  console.error(`REFUSING to report: ${(lossRate * 100).toFixed(0)}% of rows failed to score. ` +
+    `Any accuracy computed on the remainder is a number for a different, smaller corpus.`);
+  process.exit(1);
+}
 if (scored.length < 2) { console.error('too few scored rows'); process.exit(1); }
 
 const mean = (a: Array<{ score: number }>) => a.reduce((s, r) => s + r.score, 0) / a.length;

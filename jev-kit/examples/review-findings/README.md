@@ -34,9 +34,14 @@ way rather than an error.
 | Balanced accuracy | 100.0% | **74.9%** |
 | Mean score, real defects | 0.680 | 0.605 |
 | Mean score, false positives | 0.931 | 0.759 |
-| Separation | 0.251 | 0.153 |
-| Zero-false-drop threshold | 0.82 | 0.89 |
+| Separation | 0.251–0.255 | 0.153 |
+| Zero-false-drop threshold | 0.82–0.83 | 0.89 |
 | False positives dropped at that threshold | **100%** | **20%** |
+
+The synthetic column is given as a range because two independent runs produced
+0.251/0.82 and 0.255/0.83. Accuracy was 100.0% both times; the cut point is a
+plateau, not a value, and a threshold quoted to two decimals from one run is
+false precision.
 
 **The synthetic number is not the real number, and the difference is the point of this
 table.** The corpus in this repo was written from the same taxonomy as the battery

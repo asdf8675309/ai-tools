@@ -48,7 +48,9 @@ interface ScoredRow extends CorpusRow {
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN = process.env.CF_API_TOKEN;
 const CF_AIG_TOKEN = process.env.CF_AIG_TOKEN; // optional
-const JEV_GATEWAY = "vfc-document-processing";
+// Optional. Unset means call Workers AI directly with no gateway, which works
+// fine — the gateway only adds logging, caching and cost attribution.
+const JEV_GATEWAY = process.env.CF_AI_GATEWAY;
 const JEV_MODEL = "typesafe/jev";
 const JEV_QUESTION_KEY = "unverified";
 const JEV_INSTRUCTIONS =
@@ -73,9 +75,9 @@ async function jevDecide(
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${CF_API_TOKEN}`,
-        "cf-aig-gateway-id": JEV_GATEWAY,
-        ...(CF_AIG_TOKEN ? { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` } : {}),
-        "cf-aig-metadata": JSON.stringify({ role: "jevkit-unverified-claims" }),
+        ...(JEV_GATEWAY ? { "cf-aig-gateway-id": JEV_GATEWAY } : {}),
+        ...(JEV_GATEWAY && CF_AIG_TOKEN ? { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` } : {}),
+        ...(JEV_GATEWAY ? { "cf-aig-metadata": JSON.stringify({ role: "jevkit-unverified-claims" }) } : {}),
       },
       body: JSON.stringify({
         model: JEV_MODEL,
@@ -256,6 +258,16 @@ async function main() {
       console.error(`  ${f.id}: ${f.error}`);
     }
     if (failed.length > 10) console.error(`  ... and ${failed.length - 10} more`);
+  }
+
+  // A headline computed over a corpus that partly failed to score is a number
+  // for a different, smaller corpus. The coverage line below states it, but a
+  // reader quoting the accuracy will not carry that line with them.
+  if (failed.length / scored.length > 0.1) {
+    console.error(
+      `REFUSING to report: ${((failed.length / scored.length) * 100).toFixed(0)}% of rows failed to score.`,
+    );
+    process.exit(1);
   }
 
   const ok = scored.filter((r): r is ScoredRow & { score: number } => r.score !== null);

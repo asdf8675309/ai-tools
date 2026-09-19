@@ -159,15 +159,22 @@ export function maxGate(
   answers: Record<string, JevAnswer>,
   threshold: number,
   keys?: string[],
-): { fired: boolean; top?: string; value: number } {
+): { fired: boolean; top?: string; value: number; scored: number } {
   let top: string | undefined;
   let value = 0;
+  let scored = 0;
   for (const [key, a] of Object.entries(answers)) {
     if (keys && !keys.includes(key)) continue;
     const p = a.noul;
-    if (typeof p === 'number' && p > value) { value = p; top = key; }
+    if (typeof p !== 'number' || Number.isNaN(p)) continue;
+    scored++;
+    if (p > value) { value = p; top = key; }
   }
-  return { fired: value >= threshold, top, value };
+  // `scored` exists because `fired: false` with zero usable answers is
+  // indistinguishable from `fired: false` with every answer genuinely low, and
+  // the first case means the model did not answer at all. Gating on `fired`
+  // alone turns a total failure into a silent pass.
+  return { fired: scored > 0 && value >= threshold, top, value, scored };
 }
 
 /** Three-band routing for choice/score confidence: act automatically, flag for a

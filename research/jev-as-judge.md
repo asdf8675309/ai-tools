@@ -98,6 +98,32 @@ cases through an LLM judge when you need a written explanation.** They
 report Jev holding **>92% agreement with a committee of LLM judges at ~1% of
 the cost**. Langfuse published a matching eval integration on 2026-09-18.
 
+### Question framing dominates the result
+
+Reported by a sibling session working on an `AskJev` skill, measured on one
+real task — one measurement, not a law, and not independently reproduced
+here:
+
+- A **single compound** calibrated question scored **-0.120** separation.
+  That is the wrong side of chance: the model graded how the text *sounded*
+  rather than evaluating the disjunction.
+- **Splitting it into narrow questions and aggregating with `max`** moved
+  the same task to **+0.251**.
+
+This is consistent with the published weakness ("literal reading" and "weak
+at indirection") and it promotes a design rule: **never ask Jev a compound
+question.** One proposition per `Noul`, composed in code. It also means the
+substance of a Jev integration is the framing, not the API call — the API
+call is four lines.
+
+A second, sharper caution from the same work: **whoever writes the options
+shapes the answer.** When that session put its own open question to Jev, its
+own prior recommendation won at 87% — a confound, not a confirmation. Their
+skill requires a `framedBy` field and refuses to run without it, printing it
+above every result. Any lane we build should record who wrote the options
+alongside the verdict, and a Jev score should never be cited as independent
+support for the framer's own position.
+
 So the honest framing of the end goal: Jev is not the judge. **The test
 runner is the judge; Jev is the bailiff** — it decides what gets in front of
 the judge, what happens to the verdict, and when to call a human.
@@ -115,6 +141,12 @@ pass 1, adversarially disprove in pass 2, then filter. Candidate lanes:
 | Phase 4 disprove filter | `Noul` "this finding survives the cited counter-argument" | Cheap pre-pass to rank; the LLM still writes the disproof for anything uncertain. |
 | Finding dedup / cap | `Score` on severity + `Noul` "duplicate of finding N" | Ranked cap currently needs judgment; this is a per-pair call at sub-cent cost. |
 | Phase 0 eligibility | `Noul` "docs-only", "oversized", "generated file" | Deterministic checks stay; Jev catches the semantic misses. |
+
+Related work already in flight: a sibling session has an `AskJev` skill on
+the unpushed branch `feat/jev-decision-tools` (which also adds a `jev-kit/`
+primitive with two measured examples). Anything built from the table above
+should start from that branch rather than a second implementation of the
+same thing.
 
 **The 32k state limit is the binding constraint.** A 1000-line diff plus
 surrounding context will not fit in one call. Crucible already refuses diffs

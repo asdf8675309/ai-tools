@@ -131,3 +131,88 @@ test('confidenceBand routes act/review/hold by threshold, and missing confidence
   expect(confidenceBand(0.3, 0.8, 0.5)).toBe('hold');
   expect(confidenceBand(undefined, 0.8, 0.5)).toBe('review');
 });
+
+// Both guards below were added after a review found the failure they prevent.
+// Each asserts the DISTINCTION, not just the happy path — the defect was that
+// two different situations produced identical output.
+
+test('maxGate does not fire on zero answers, even at a threshold of 0', () => {
+  // This is the case the guard exists for. `value` starts at 0, so without the
+  // scored check `0 >= 0` is true and a gate with NO answers fires on nothing.
+  // At a high threshold the bug is invisible, which is why it survived.
+  const none = maxGate({}, 0);
+  expect(none.fired).toBe(false);
+  expect(none.scored).toBe(0);
+
+  // A genuine 0.0 answer at threshold 0 SHOULD fire — the gate must distinguish
+  // "the model said zero" from "the model said nothing".
+  const real = maxGate({ a: { type: 'noul', noul: 0 } }, 0);
+  expect(real.fired).toBe(true);
+  expect(real.scored).toBe(1);
+});
+
+test('maxGate ignores non-numeric and NaN nouls rather than scoring them as 0', () => {
+  expect(maxGate({ a: { type: 'noul' } as never }, 0.8).scored).toBe(0);
+  expect(maxGate({ a: { type: 'noul', noul: NaN } }, 0.8).scored).toBe(0);
+});
+
+test('maxGate still fires on a genuine high answer', () => {
+  const g = maxGate({ lo: { type: 'noul', noul: 0.1 }, hi: { type: 'noul', noul: 0.95 } }, 0.8);
+  expect(g.fired).toBe(true);
+  expect(g.top).toBe('hi');
+  expect(g.scored).toBe(2);
+});
+
+// ── provider seam ─────────────────────────────────────────────────────────
+// The three routes reach the same model but differ in URL, request shape and
+// response shape. These assert the wiring without spending a call.
+
+test('each provider targets its own endpoint and credential', async () => {
+  const seen: Array<{ url: string; body: unknown; auth: string }> = [];
+  const fake = (async (url: string, init: RequestInit) => {
+    seen.push({ url, body: JSON.parse(String(init.body)), auth: String((init.headers as Record<string, string>).Authorization) });
+    return new Response(JSON.stringify({ answers: { q: { type: 'noul', noul: 0.5 } } }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const orig = globalThis.fetch;
+  globalThis.fetch = fake;
+  try {
+    const q = { q: { type: 'noul' as const, instructions: 'x' } };
+    await decide({ provider: 'openrouter', apiToken: 'or-key', state: 's', questions: q });
+    await decide({ provider: 'typesafe', apiToken: 'ts-key', state: 's', questions: q });
+    await decide({ provider: 'workers-ai', apiToken: 'cf-key', accountId: 'acct', state: 's', questions: q });
+  } finally {
+    globalThis.fetch = orig;
+  }
+
+  expect(seen).toHaveLength(3);
+  const [or, ts, cf] = seen as [typeof seen[0], typeof seen[0], typeof seen[0]];
+
+  expect(or.url).toBe('https://openrouter.ai/api/alpha/decisions');
+  expect(ts.url).toBe('https://api.typesafe.ai/v1/systemone');
+  expect(cf.url).toContain('/accounts/acct/ai/run');
+
+  // Each carries its OWN credential, not a shared one.
+  expect(or.auth).toBe('Bearer or-key');
+  expect(ts.auth).toBe('Bearer ts-key');
+  expect(cf.auth).toBe('Bearer cf-key');
+
+  // Workers AI wraps in `input`; the other two are flat. Getting this backwards
+  // is a 400 that reads like a malformed question rather than a wrong shape.
+  expect(or.body).toHaveProperty('state');
+  expect(ts.body).toHaveProperty('state');
+  expect(cf.body).toHaveProperty('input');
+});
+
+test('an unknown provider fails closed with a named error', async () => {
+  const r = await decide({ provider: 'nope' as never, state: 's', questions: {} });
+  expect(r.ok).toBe(false);
+  expect(r.error).toContain('unknown provider');
+});
+
+test('a missing credential names the provider-specific env var', async () => {
+  const r = await decide({ provider: 'typesafe', apiToken: undefined, state: 's', questions: {} });
+  if (!process.env.TYPESAFE_API_KEY) {
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('TYPESAFE_API_KEY');
+  }
+});

@@ -28,11 +28,53 @@ if (maxGate(res.answers!, 0.74).fired) {
 
 ```
 bun install
-export CF_ACCOUNT_ID=...   # Cloudflare account
-export CF_API_TOKEN=...    # token with Workers AI access
+```
+
+Then pick whichever account you already have. All three reach the same model.
+
+**Cloudflare Workers AI** (the default, and no TypeSafe account needed):
+
+```
+export CF_ACCOUNT_ID=...
+export CF_API_TOKEN=...
 export CF_AI_GATEWAY=...   # optional: an AI Gateway id, for logging and caching
 bun run smoke
 ```
+
+**OpenRouter:**
+
+```
+export JEV_PROVIDER=openrouter
+export OPENROUTER_API_KEY=...
+```
+
+**TypeSafe directly:**
+
+```
+export JEV_PROVIDER=typesafe
+export TYPESAFE_API_KEY=...
+```
+
+Or per call, ignoring the environment entirely:
+
+```ts
+await decide({ provider: 'openrouter', apiToken: key, state, questions });
+```
+
+### Which one to pick
+
+They terminate at the same model, so this is about billing and observability,
+not redundancy — an outage or a terms change affects all three together.
+
+| | |
+|---|---|
+| **Workers AI** | No TypeSafe account. The only route that can go through an AI Gateway, which is what gives you request/response logging, caching and cost attribution. Default for that reason. |
+| **OpenRouter** | If your spend is already consolidated there. Measured slightly faster than the Workers AI path in our testing. |
+| **TypeSafe** | First-party. Implemented to the documented contract but **not verified against a live key** — if you use it and the response shape differs, that is a bug worth reporting. |
+
+Model defaults differ per provider (`typesafe/jev` on Workers AI,
+`typesafe/jev-1.13` on OpenRouter, `jev-1.13` direct) because the slugs differ.
+Pin an exact version anywhere a measured threshold depends on behaviour.
 
 The smoke test exercises all three question shapes against the live model and asserts the
 contract each one has. It exits non-zero on failure, so it works as a CI gate.

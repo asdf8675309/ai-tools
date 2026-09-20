@@ -46,12 +46,101 @@ export type CallObserver = (event: {
   error?: string;
 }) => void;
 
+/** The three ways to reach Jev. They all terminate at the same TypeSafe model,
+ * so this is about which account you already have and which bill you want it
+ * on — not about redundancy. An outage or a terms change affects all three.
+ *
+ * `workers-ai` is the default because it needs no TypeSafe account, and it is
+ * the only one that can route through an AI Gateway for request/response
+ * logging and cost attribution. */
+export type JevProvider = 'workers-ai' | 'openrouter' | 'typesafe';
+
+interface ProviderSpec {
+  defaultModel: string;
+  /** Env var holding this provider's credential, for the error message. */
+  tokenEnv: string;
+  url(cfg: { accountId?: string }): string;
+  /** Request bodies differ: Workers AI wraps in `input`, the others are flat. */
+  body(model: string, state: string, questions: Record<string, JevQuestion>): unknown;
+  /** Response shapes differ: Workers AI nests at result.result, others are flat. */
+  extract(json: unknown): { answers?: Record<string, JevAnswer>; usage?: DecideResult['usage']; error?: string };
+}
+
+const PROVIDERS: Record<JevProvider, ProviderSpec> = {
+  'workers-ai': {
+    defaultModel: 'typesafe/jev',
+    tokenEnv: 'CF_API_TOKEN',
+    url: ({ accountId }) => `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run`,
+    body: (model, state, questions) => ({ model, input: { state, questions } }),
+    extract: (json) => {
+      const j = json as {
+        success?: boolean;
+        errors?: { message?: string }[];
+        result?: { result?: { answers?: Record<string, JevAnswer>; usage?: DecideResult['usage'] } };
+      };
+      if (j.success === false) {
+        return { error: j.errors?.map((e) => e.message).join('; ') || 'workers-ai reported failure' };
+      }
+      // Workers AI nests twice: result.result.answers, not answers.
+      const inner = j.result?.result;
+      if (!inner?.answers) return { error: 'no result.result.answers in response' };
+      return { answers: inner.answers, usage: inner.usage };
+    },
+  },
+
+  openrouter: {
+    // Pinned rather than floating: a threshold measured against one version is
+    // not valid for another, so an alias that moves under you is a hazard.
+    defaultModel: 'typesafe/jev-1.13',
+    tokenEnv: 'OPENROUTER_API_KEY',
+    url: () => 'https://openrouter.ai/api/alpha/decisions',
+    body: (model, state, questions) => ({ model, state, questions }),
+    extract: (json) => {
+      const j = json as {
+        answers?: Record<string, JevAnswer>;
+        usage?: { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+        error?: { message?: string };
+      };
+      if (j.error) return { error: j.error.message ?? 'openrouter reported failure' };
+      if (!j.answers) return { error: 'no answers in response' };
+      return {
+        answers: j.answers,
+        usage: {
+          input_tokens: j.usage?.input_tokens ?? j.usage?.prompt_tokens,
+          output_tokens: j.usage?.output_tokens ?? j.usage?.completion_tokens,
+        },
+      };
+    },
+  },
+
+  typesafe: {
+    defaultModel: 'jev-1.13',
+    tokenEnv: 'TYPESAFE_API_KEY',
+    url: () => 'https://api.typesafe.ai/v1/systemone',
+    body: (model, state, questions) => ({ model, state, questions }),
+    extract: (json) => {
+      const j = json as {
+        answers?: Record<string, JevAnswer>;
+        usage?: DecideResult['usage'];
+        error?: { message?: string };
+      };
+      if (j.error) return { error: j.error.message ?? 'typesafe reported failure' };
+      if (!j.answers) return { error: 'no answers in response' };
+      return { answers: j.answers, usage: j.usage };
+    },
+  },
+};
+
 export interface DecideConfig {
-  accountId?: string;
+  /** Defaults to JEV_PROVIDER, then 'workers-ai'. */
+  provider?: JevProvider;
+  /** Credential for the chosen provider. Defaults to that provider's env var. */
   apiToken?: string;
-  /** AI Gateway id. Omit to call Workers AI directly with no gateway. */
+  /** workers-ai only. */
+  accountId?: string;
+  /** workers-ai only. AI Gateway id; omit to call Workers AI directly. */
   gateway?: string;
-  /** Gateway auth, when the gateway has authentication enabled. */
+  /** workers-ai only. Gateway auth, when the gateway has authentication on. */
   gatewayToken?: string;
   observer?: CallObserver;
 }
@@ -61,13 +150,14 @@ export interface DecideOptions extends DecideConfig {
   state: string;
   /** Ask several questions at once — one request, one state, many answers. */
   questions: Record<string, JevQuestion>;
-  /** Tag for cost attribution in the gateway log. */
+  /** Tag for cost attribution. Only reaches the log on the gateway path. */
   role?: string;
   model?: string;
   timeoutMs?: number;
+  /** workers-ai + gateway only. */
   skipCache?: boolean;
-  /** Keep metadata in the gateway log but drop request/response bodies.
-   * Suppresses RETENTION, not transit. */
+  /** workers-ai + gateway only. Keeps metadata in the gateway log but drops
+   * request/response bodies. Suppresses RETENTION, not transit. */
   noLogPayload?: boolean;
 }
 
@@ -82,44 +172,60 @@ export interface DecideResult {
   /** HTTP status when the failure was an HTTP one. 429 means throttled, and
    * carries a retry-after header worth honouring. */
   status?: number;
+  /** Which provider actually served this call. */
+  provider?: JevProvider;
 }
 
-export const DEFAULT_MODEL = 'typesafe/jev';
+/** Default for the default provider. Per-provider defaults live in PROVIDERS. */
+export const DEFAULT_MODEL = PROVIDERS['workers-ai'].defaultModel;
 
 export async function decide(options: DecideOptions): Promise<DecideResult> {
+  const provider = options.provider
+    ?? (process.env.JEV_PROVIDER as JevProvider | undefined)
+    ?? 'workers-ai';
+  const spec = PROVIDERS[provider];
+  if (!spec) {
+    return { ok: false, durationMs: 0, error: `unknown provider '${provider}' (expected ${Object.keys(PROVIDERS).join(', ')})` };
+  }
+
   const {
-    state, questions, role = 'decide', model = DEFAULT_MODEL,
+    state, questions, role = 'decide', model = spec.defaultModel,
     accountId = process.env.CF_ACCOUNT_ID,
-    apiToken = process.env.CF_API_TOKEN,
     gateway = process.env.CF_AI_GATEWAY,
     gatewayToken = process.env.CF_AIG_TOKEN,
     observer,
   } = options;
+  const apiToken = options.apiToken ?? process.env[spec.tokenEnv];
 
-  if (!accountId) return { ok: false, durationMs: 0, error: 'missing CF_ACCOUNT_ID' };
-  if (!apiToken) return { ok: false, durationMs: 0, error: 'missing CF_API_TOKEN' };
+  if (!apiToken) return { ok: false, durationMs: 0, provider, error: `missing ${spec.tokenEnv}` };
+  if (provider === 'workers-ai' && !accountId) {
+    return { ok: false, durationMs: 0, provider, error: 'missing CF_ACCOUNT_ID' };
+  }
+
+  // Gateway headers are a Cloudflare feature and meaningless elsewhere.
+  const onGateway = provider === 'workers-ai' && !!gateway;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
   const started = Date.now();
   const report = (r: DecideResult) => {
     observer?.({ ok: r.ok, role, model, durationMs: r.durationMs, usage: r.usage, error: r.error });
-    return r;
+    return { ...r, provider };
   };
 
   try {
-    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run`, {
+    const res = await fetch(spec.url({ accountId }), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiToken}`,
-        ...(gateway ? { 'cf-aig-gateway-id': gateway } : {}),
-        ...(gateway && gatewayToken ? { 'cf-aig-authorization': `Bearer ${gatewayToken}` } : {}),
-        ...(gateway ? { 'cf-aig-metadata': JSON.stringify({ role, model }) } : {}),
-        ...(options.skipCache ? { 'cf-aig-skip-cache': 'true' } : {}),
-        ...(options.noLogPayload ? { 'cf-aig-collect-log-payload': 'false' } : {}),
+        ...(onGateway ? { 'cf-aig-gateway-id': gateway! } : {}),
+        ...(onGateway && gatewayToken ? { 'cf-aig-authorization': `Bearer ${gatewayToken}` } : {}),
+        ...(onGateway ? { 'cf-aig-metadata': JSON.stringify({ role, model }) } : {}),
+        ...(onGateway && options.skipCache ? { 'cf-aig-skip-cache': 'true' } : {}),
+        ...(onGateway && options.noLogPayload ? { 'cf-aig-collect-log-payload': 'false' } : {}),
       },
-      body: JSON.stringify({ model, input: { state, questions } }),
+      body: JSON.stringify(spec.body(model, state, questions)),
       signal: controller.signal,
     });
     const durationMs = Date.now() - started;
@@ -129,25 +235,15 @@ export async function decide(options: DecideOptions): Promise<DecideResult> {
       return report({ ok: false, durationMs, status: res.status, error: `HTTP ${res.status}: ${body}` });
     }
 
-    // Workers AI nests twice: result.result.answers, not answers.
-    const json = (await res.json()) as {
-      success?: boolean;
-      errors?: { message?: string }[];
-      result?: { result?: { answers?: Record<string, JevAnswer>; usage?: DecideResult['usage'] } };
-    };
-    if (json.success === false) {
-      const error = json.errors?.map((e) => e.message).join('; ') || 'workers-ai reported failure';
-      return report({ ok: false, durationMs, error });
-    }
-    const inner = json.result?.result;
-    if (!inner?.answers) return report({ ok: false, durationMs, error: 'no result.result.answers in response' });
+    const { answers, usage, error } = spec.extract(await res.json());
+    if (error || !answers) return report({ ok: false, durationMs, error: error ?? 'no answers in response' });
 
     // A response carrying SOME of the requested answers still returns ok:true,
     // because partial answers are usable. But the caller has to be able to tell:
     // asking seven questions and receiving two should not look identical to
     // receiving seven. `missing` names the keys that came back absent.
-    const missing = Object.keys(questions).filter((k) => !(k in inner.answers!));
-    return report({ ok: true, answers: inner.answers, usage: inner.usage, durationMs, missing });
+    const missing = Object.keys(questions).filter((k) => !(k in answers));
+    return report({ ok: true, answers, usage, durationMs, missing });
   } catch (error) {
     const durationMs = Date.now() - started;
     return report({ ok: false, durationMs, error: error instanceof Error ? error.message : String(error) });

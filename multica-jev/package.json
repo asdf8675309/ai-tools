@@ -1,0 +1,61 @@
+{
+  "name": "multica-jev",
+  "version": "0.3.4",
+  "description": "An advisory Jev decision tool for Multica agents in OpenCode and Pi",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "adapters",
+    "bin",
+    "src",
+    "deploy/opencode-entrypoint.mjs",
+    "LICENSE",
+    "README.md",
+    "package.json"
+  ],
+  "exports": {
+    ".": "./src/core.mjs",
+    "./opencode": "./adapters/opencode.mjs",
+    "./pi": "./adapters/pi.mjs",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "multica-jev": "./bin/multica-jev.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.31",
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@sinclair/typebox": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "multica",
+    "jev",
+    "typesafe",
+    "opencode",
+    "pi-package",
+    "ai-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./adapters/pi.mjs"
+    ]
+  }
+}

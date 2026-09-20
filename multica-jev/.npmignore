@@ -1,0 +1,4 @@
+deploy/opencode-docker.patch
+test/
+node_modules/
+package-lock.json

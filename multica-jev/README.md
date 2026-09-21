@@ -67,6 +67,11 @@ pi install npm:multica-jev
 The package manifest loads `adapters/pi.mjs` as a Pi extension. The extension
 registers the same `multica_jev_decide` tool.
 
+That adapter imports `@sinclair/typebox` for its parameter schema, declared as
+an **optional** peer dependency. Pi supplies it, and the import only runs on
+the Pi path, so an OpenCode install never needs it and is not made to carry
+it. If you load the Pi adapter in some other host, install typebox there.
+
 ### In a container image
 
 If your OpenCode runs from an image with a read-only plugin directory, install
@@ -188,17 +193,36 @@ size; oversized state is rejected instead of silently truncated.
 
 ## Safety boundary
 
-This package has no Multica, repository, issue, or comment write path. It also
-refuses custom questions that try to automate these protected judgments:
+**The real boundary is architectural: this package has no Multica, repository,
+issue, or comment write path at all.** It reads a state, asks a model, and
+returns numbers. Nothing it returns can change anything on its own, which is
+what actually makes it safe to hand to an agent.
+
+On top of that sits a much weaker thing, described here honestly because it is
+easy to mistake for a boundary. A short pattern list refuses questions that ask
+Jev to make judgments reserved for a human:
 
 - resolving a review thread;
 - judging whether a finding is real;
 - scoping or creating a card; and
 - deciding that an issue is decision-gated.
 
-Those decisions belong to a human or the supervising session. Jev's confidence
-is evidence for routing and escalation, not authorization to take a protected
-action.
+**That list matches wording, not meaning, and ordinary paraphrases get past
+it.** "Is this finding real?" is refused; "is this a genuine defect worth
+fixing?" is not. Treat it as a tripwire that catches the obvious phrasing and
+makes the intent explicit to anyone reading the code — not as something that
+stops a determined caller, and not as a reason to relax review of what agents
+ask it.
+
+Widening the check is deliberately not the fix. The patterns are not applied to
+the `state`, because a state legitimately describing a card or a review thread
+would then be refused during perfectly ordinary triage; and each pattern added
+to catch one more phrasing buys a little coverage at the cost of more false
+refusals and more apparent assurance than the mechanism can support.
+
+Jev's confidence is evidence for routing and escalation, never authorization to
+take a protected action. That rule holds regardless of what the pattern list
+catches.
 
 The package intentionally sends only the supplied state and questions to
 TypeSafe. It does not include `MULTICA_TOKEN` or other credentials in the

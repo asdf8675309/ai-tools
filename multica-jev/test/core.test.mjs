@@ -12,10 +12,10 @@ import {
 
 // Provider selection reads the ambient environment: an OPENROUTER_API_KEY in
 // the shell makes the default provider OpenRouter rather than TypeSafe. Most
-// tests below mock the TypeSafe client, so without this the suite passes on a
-// machine with no OpenRouter key and fails on one that has it. Clear both up
-// front; the one test that exercises the OpenRouter path sets them itself and
-// restores them afterwards.
+// tests below mock the TypeSafe client, so without this the suite does not
+// merely fail on a machine that has the key. It sends a real request to
+// OpenRouter from a test run. Clear both up front; the one test that exercises
+// the OpenRouter path sets them itself and restores them afterwards.
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.MULTICA_JEV_PROVIDER;
 

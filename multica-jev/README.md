@@ -235,9 +235,17 @@ agent, but are not read by this tool.
 npm test
 ```
 
-The tests mock the TypeSafe client and cover the request fan-out, question
-validation, and protected-decision policy. A live API call requires a
-`TYPESAFE_API_KEY` and is deliberately not part of the default test suite.
+The tests mock the TypeSafe client. They cover the request fan-out, question
+validation, and protected-decision policy.
+
+The suite makes no network call, and it must stay that way. Provider selection
+reads the ambient environment, so an `OPENROUTER_API_KEY` or a
+`MULTICA_JEV_PROVIDER` in your shell would otherwise send a mocked test to a
+live endpoint. `test/core.test.mjs` clears both variables when it loads. If you
+add a test that selects a provider, set those variables inside that test and
+restore them when it ends.
+
+Run the suite once with `OPENROUTER_API_KEY` set to confirm this holds.
 
 ## License
 

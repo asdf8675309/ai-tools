@@ -25,11 +25,13 @@ async function main(argv) {
     process.exitCode = 2;
     return;
   }
-  let questionsJson = args.questions;
-  if (questionsJson && questionsJson.startsWith("@")) {
-    questionsJson = await readFile(questionsJson.slice(1), "utf8");
-  }
   try {
+    // Inside the try. An unreadable @file is a user error like any other, and
+    // outside it the process died with a raw Node stack trace.
+    let questionsJson = args.questions;
+    if (questionsJson && questionsJson.startsWith("@")) {
+      questionsJson = await readFile(questionsJson.slice(1), "utf8");
+    }
     const result = await evaluateDecision({
       state: args.state,
       purpose: args.purpose || "triage",

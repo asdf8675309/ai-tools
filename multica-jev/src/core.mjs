@@ -474,6 +474,14 @@ async function evaluateWithOpenRouter({
     const message = payload?.error?.message ?? response.statusText ?? "request failed";
     throw new Error(`OpenRouter request failed (${response.status}): ${message}`);
   }
+  // A success status with an unreadable body reaches here with payload null.
+  // Without this the next line throws a TypeError naming a property, which
+  // tells the caller nothing about what went wrong.
+  if (!isRecord(payload)) {
+    throw new Error(
+      `OpenRouter returned ${response.status} with a body that is not a JSON object`,
+    );
+  }
 
   return {
     model: payload.model ?? model,

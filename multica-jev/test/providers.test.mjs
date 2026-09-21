@@ -357,3 +357,19 @@ test("oversized state is refused rather than truncated, before any transport is 
     assert.equal(client.calls.length, 0);
   });
 });
+
+test("a success status with an unreadable body is reported, not thrown as a TypeError", async () => {
+  await withEnv({ OPENROUTER_API_KEY: "key" }, async () => {
+    const fetchImpl = recordingFetch(null, { status: 200, json: false });
+    await assert.rejects(
+      () => evaluateDecision({
+        state: "s", purpose: "custom", questions: noulQuestion(), provider: "openrouter", fetchImpl,
+      }),
+      (error) => {
+        assert.ok(!(error instanceof TypeError), `expected a reported error, got ${error}`);
+        assert.match(error.message, /OpenRouter returned 200 with a body that is not a JSON object/);
+        return true;
+      },
+    );
+  });
+});

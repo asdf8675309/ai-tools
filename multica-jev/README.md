@@ -235,8 +235,15 @@ agent, but are not read by this tool.
 npm test
 ```
 
-The tests mock the TypeSafe client. They cover the request fan-out, question
-validation, and protected-decision policy.
+Three suites run. `test/core.test.mjs` mocks the TypeSafe client and covers the
+request fan-out, question validation, and protected-decision policy.
+`test/providers.test.mjs` covers provider selection, model precedence, the
+OpenRouter request shape, and the rejection of a malformed provider response.
+`test/adapters.test.mjs` drives both host adapters end to end against a stubbed
+transport.
+
+The Pi adapter needs `@sinclair/typebox`. That package is an optional peer
+dependency for users and a dev dependency here, so the adapter can be tested.
 
 The suite makes no network call, and it must stay that way. Provider selection
 reads the ambient environment, so an `OPENROUTER_API_KEY` or a

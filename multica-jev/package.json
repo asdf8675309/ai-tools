@@ -57,5 +57,8 @@
     "extensions": [
       "./adapters/pi.mjs"
     ]
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.52"
   }
 }

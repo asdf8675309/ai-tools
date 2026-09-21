@@ -9,7 +9,7 @@ function usage() {
   );
 }
 
-async function main(argv) {
+function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -20,14 +20,20 @@ async function main(argv) {
     args[key] = value;
     index += 1;
   }
-  if (!args.state) {
-    usage();
-    process.exitCode = 2;
-    return;
-  }
+  return args;
+}
+
+async function main(argv) {
+  // Everything that can fail belongs inside the try. Argument parsing and the
+  // @file read both throw on ordinary user mistakes, and outside it the process
+  // died with a raw Node stack trace instead of the CLI error message.
   try {
-    // Inside the try. An unreadable @file is a user error like any other, and
-    // outside it the process died with a raw Node stack trace.
+    const args = parseArgs(argv);
+    if (!args.state) {
+      usage();
+      process.exitCode = 2;
+      return;
+    }
     let questionsJson = args.questions;
     if (questionsJson && questionsJson.startsWith("@")) {
       questionsJson = await readFile(questionsJson.slice(1), "utf8");

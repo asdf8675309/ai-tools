@@ -43,3 +43,17 @@ test("a missing --state prints usage and exits 2", async () => {
   assert.equal(code, 2);
   assert.match(stderr, /Usage: multica-jev/);
 });
+
+test("an unknown argument is reported as a CLI error, not a crash", async () => {
+  const { code, stderr } = await runCli(["--state", "s", "--bogus"]);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /^multica-jev error: /m);
+  assert.doesNotMatch(stderr, /triggerUncaughtException/);
+});
+
+test("a bare positional argument is reported as a CLI error, not a crash", async () => {
+  const { code, stderr } = await runCli(["oops"]);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /^multica-jev error: Unexpected argument oops/m);
+  assert.doesNotMatch(stderr, /triggerUncaughtException/);
+});

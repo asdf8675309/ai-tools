@@ -373,3 +373,30 @@ test("a success status with an unreadable body is reported, not thrown as a Type
     );
   });
 });
+
+test("the priority composite scales each score by its own question's level count", async () => {
+  await withEnv({ OPENROUTER_API_KEY: "key" }, async () => {
+    const levels = ["a", "b", "c", "d", "e", "f"];
+    const names = ["impact", "urgency", "effort"];
+    const questions = Object.fromEntries(
+      names.map((n) => [n, { type: "score", instructions: n, criteria: levels }]),
+    );
+    const fetchImpl = recordingFetch({
+      model: "m",
+      answers: Object.fromEntries(names.map((n) => [n, {
+        type: "score",
+        score: 3,
+        confidence: 0.9,
+        probabilities: Object.fromEntries(levels.map((_, i) => [String(i), 1 / levels.length])),
+      }])),
+      usage: {},
+    });
+    const result = await evaluateDecision({
+      state: "s", purpose: "prioritize", questions, provider: "openrouter", fetchImpl,
+    });
+    // 3 of 6 levels is 3/5 = 0.6. A fixed divisor of 3 would clamp it to 1.
+    assert.equal(result.multica.composite.components.impact, 0.6);
+    assert.equal(result.multica.composite.components.urgency, 0.6);
+    assert.equal(result.multica.composite.components.effort_inverse, 0.4);
+  });
+});

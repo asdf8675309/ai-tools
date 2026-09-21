@@ -309,14 +309,22 @@ function assertState(state, maximumChars) {
   return state;
 }
 
-function priorityComposite(answers) {
+// Scales each score by its own question's level count. A fixed divisor is only
+// correct for the built-in four-level questions; with any other set the
+// normalized value is wrong and clamping hides it, so 3 of 6 levels reads as
+// 1.0 rather than 0.6.
+function priorityComposite(answers, questions) {
   const names = ["impact", "urgency", "effort"];
   const scores = Object.fromEntries(names.map((name) => {
     const answer = answers[name];
     if (!isRecord(answer) || answer.type !== "score" || typeof answer.score !== "number") {
       throw new Error(`Jev returned an invalid score for ${name}`);
     }
-    return [name, Math.min(1, Math.max(0, answer.score / 3))];
+    const levels = questions?.[name]?.criteria?.length;
+    if (!Number.isInteger(levels) || levels < 2) {
+      throw new Error(`Cannot scale ${name}: its question defines no score levels`);
+    }
+    return [name, Math.min(1, Math.max(0, answer.score / (levels - 1)))];
   }));
   const effortInverse = 1 - scores.effort;
   const score = (0.45 * scores.impact) + (0.35 * scores.urgency) + (0.20 * effortInverse);
@@ -545,7 +553,7 @@ export async function evaluateDecision({
     advisory_only: true,
     protected_actions_require_human: true,
   };
-  if (purpose === "prioritize") multica.composite = priorityComposite(response.answers);
+  if (purpose === "prioritize") multica.composite = priorityComposite(response.answers, normalizedQuestions);
 
   return {
     model: response.model,

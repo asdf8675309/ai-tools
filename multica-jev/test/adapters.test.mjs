@@ -157,16 +157,23 @@ test("both adapters forward purpose, provider, model and parsed questions to the
     });
 
     const entry = await openCodeTool();
-    await entry.execute({
+    const openCodeOutput = await entry.execute({
       state: "s", purpose: "custom", provider: "openrouter", model: "pinned-a", questions_json: questionsJson,
     });
     const { tool } = piTool();
-    await tool.execute("call-1", {
+    const piOutput = await tool.execute("call-1", {
       state: "s", purpose: "custom", provider: "openrouter", model: "pinned-b", questions_json: questionsJson,
     });
 
     assert.equal(calls[0].body.model, "pinned-a");
     assert.equal(calls[1].body.model, "pinned-b");
+
+    // purpose and provider are not visible in the request body, so they are
+    // asserted where they do surface: the marker the adapter returns.
+    for (const marker of [JSON.parse(openCodeOutput).multica, piOutput.details.multica]) {
+      assert.equal(marker.purpose, "custom");
+      assert.equal(marker.provider, "openrouter");
+    }
     for (const call of calls) {
       assert.deepEqual(Object.keys(call.body.questions), ["lane"]);
       assert.equal(call.body.questions.lane.type, "choice");

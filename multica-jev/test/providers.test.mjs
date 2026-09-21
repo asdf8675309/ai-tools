@@ -23,12 +23,16 @@ const PROVIDER_ENV = [
   "MULTICA_JEV_MAX_STATE_CHARS",
 ];
 
-function withEnv(values, run) {
+// This must await run(). Returning the promise from a synchronous try/finally
+// restores the environment at the callback's first await rather than at its
+// end, which leaves the tests passing only because evaluateDecision happens to
+// read the environment before it awaits anything.
+async function withEnv(values, run) {
   const saved = Object.fromEntries(PROVIDER_ENV.map((key) => [key, process.env[key]]));
   for (const key of PROVIDER_ENV) delete process.env[key];
   Object.assign(process.env, values);
   try {
-    return run();
+    return await run();
   } finally {
     for (const key of PROVIDER_ENV) delete process.env[key];
     for (const [key, value] of Object.entries(saved)) {

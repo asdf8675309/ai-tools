@@ -242,8 +242,15 @@ OpenRouter request shape, and the rejection of a malformed provider response.
 `test/adapters.test.mjs` drives both host adapters end to end against a stubbed
 transport.
 
-The Pi adapter needs `@sinclair/typebox`. That package is an optional peer
-dependency for users and a dev dependency here, so the adapter can be tested.
+The Pi adapter needs `@sinclair/typebox`. Pi declares tool parameters as a
+TypeBox schema, so the adapter imports `Type` to build the schema it registers.
+OpenCode uses its own schema builder and does not need the package. TypeBox is
+therefore an optional peer dependency for users, and a dev dependency here so
+the Pi adapter can be loaded under test.
+
+After you pull a change that adds a dependency, run `npm install` before
+`npm test`. A missing dev dependency makes the Pi adapter fail to import, and
+the failure names the module rather than the cause.
 
 The suite makes no network call, and it must stay that way. Provider selection
 reads the ambient environment, so an `OPENROUTER_API_KEY` or a

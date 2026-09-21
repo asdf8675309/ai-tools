@@ -23,12 +23,17 @@ async function withStubbedTransport(run, { status = 200, payload } = {}) {
 
   const calls = [];
   globalThis.fetch = async (url, init) => {
-    calls.push({ url, init, body: JSON.parse(init.body) });
+    const body = JSON.parse(init.body);
+    calls.push({ url, init, body });
+    // Built here rather than inside json(). evaluateWithOpenRouter wraps its
+    // json() call in a catch that discards the error, so a throw from the
+    // builder would be swallowed and surface later as an unrelated failure.
+    const responseBody = payload ?? defaultPayload(body.questions);
     return {
       ok: status >= 200 && status < 300,
       status,
       statusText: "Test Status",
-      json: async () => payload ?? defaultPayload(JSON.parse(init.body).questions),
+      json: async () => responseBody,
     };
   };
 
@@ -47,6 +52,14 @@ async function withStubbedTransport(run, { status = 200, payload } = {}) {
 // test asserts on adapter behaviour rather than on a hand-copied question list.
 function defaultPayload(questions) {
   const answers = Object.fromEntries(Object.entries(questions).map(([name, question]) => {
+    // Without this the helper throws from deep inside the branches below, which
+    // reads as a broken stub rather than as the adapter sending a bad question.
+    if (!question || typeof question.type !== "string") {
+      throw new Error(`the adapter sent question "${name}" with no type: ${JSON.stringify(question)}`);
+    }
+    if (question.type !== "noul" && !question.criteria) {
+      throw new Error(`the adapter sent ${question.type} question "${name}" with no criteria`);
+    }
     if (question.type === "noul") return [name, { type: "noul", noul: 0.25 }];
     if (question.type === "choice") {
       const labels = Object.keys(question.criteria);

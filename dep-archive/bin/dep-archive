@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# dep-archive: restore node_modules from an archive keyed on everything that decides
+# what the install produces, or run the install once and archive the result.
+#
+#   dep-archive ensure    restore on a hit, else install + pack (default)
+#   dep-archive restore   restore only; exit 1 on a miss
+#   dep-archive build     install + pack, always
+#   dep-archive has       exit 0 if an archive exists for this key
+#   dep-archive verify    exit 0 if that archive reads back whole; discard it if not
+#   dep-archive key       print the archive key
+#
+# Exit codes: 0 ok, 1 miss or unusable archive, 2 usage or setup error,
+# 3 a node_modules is a symlink, 4 the install or the pack failed.
+# See README.md for every environment variable.
+set -euo pipefail
+
+usage() { echo "usage: dep-archive [-C dir] [ensure|restore|build|has|verify|key]" >&2; exit 2; }
+die() { echo "dep-archive: $1" >&2; exit "${2:-2}"; }
+
+target="${DEP_ARCHIVE_ROOT:-}"
+if [ "${1:-}" = "-C" ]; then
+  [ $# -ge 2 ] || usage
+  target="$2"; shift 2
+fi
+cmd="${1:-ensure}"
+
+# The caller's working directory may be unreadable or deleted (a sudo -u switch, a
+# removed worktree). find and git fail in odd ways there, so leave it first and
+# resolve the target from the path alone.
+[ -n "$target" ] || target="${PWD:-}"
+case "$target" in /*) ;; *) die "set DEP_ARCHIVE_ROOT or pass -C with an absolute path when the working directory is unknown" ;; esac
+cd / || die "cannot cd /"
+cd "$target" 2>/dev/null || die "cannot enter $target"
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+cd "$root" || die "cannot enter $root"
+
+# Package manager seam. Only npm is implemented and tested; see README "Adding a
+# package manager" for what pnpm and yarn need.
+pm="${DEP_ARCHIVE_PM:-auto}"
+if [ "$pm" = auto ]; then
+  if [ -f package-lock.json ]; then pm=npm
+  elif [ -f pnpm-lock.yaml ]; then pm=pnpm
+  elif [ -f yarn.lock ]; then pm=yarn
+  else pm=npm
+  fi
+fi
+case "$pm" in
+  npm)
+    lockfile="${DEP_ARCHIVE_LOCKFILE:-package-lock.json}"
+    config_names="${DEP_ARCHIVE_CONFIG_NAMES:-.npmrc}"
+    # npm writes this file last, so its presence shows the tree is whole.
+    marker="node_modules/.package-lock.json"
+    install_cmd="${DEP_ARCHIVE_INSTALL_CMD:-npm ci --prefer-offline --no-audit --no-fund --progress=false}"
+    pm_version() { npm -v; }
+    ;;
+  pnpm|yarn) die "$pm is not supported yet (see README, Adding a package manager)" ;;
+  *) die "unknown DEP_ARCHIVE_PM: $pm" ;;
+esac
+manifest_name="${DEP_ARCHIVE_MANIFEST_NAME:-package.json}"
+lifecycle="${DEP_ARCHIVE_LIFECYCLE:-preinstall install postinstall prepare}"
+script_dir_name="${DEP_ARCHIVE_SCRIPT_DIR:-scripts}"
+extra_files="${DEP_ARCHIVE_EXTRA_FILES:-}"
+extra_key="${DEP_ARCHIVE_EXTRA_KEY:-}"
+name="${DEP_ARCHIVE_NAME:-nm}"
+case "$name" in ''|*[!A-Za-z0-9._-]*) die "DEP_ARCHIVE_NAME may hold only letters, digits, dot, dash and underscore" ;; esac
+lock_wait="${DEP_ARCHIVE_LOCK_WAIT:-900}"
+case "$lock_wait" in ''|*[!0-9]*) lock_wait=900 ;; esac
+
+if [ -n "${DEP_ARCHIVE_DIR:-}" ]; then
+  cache="$DEP_ARCHIVE_DIR"
+elif [ -n "${DEP_ARCHIVE_DOT_ROOT:-}" ]; then
+  # A dot directory, so a garbage collector that skips hidden entries leaves it alone.
+  cache="$DEP_ARCHIVE_DOT_ROOT/.dep-archive"
+else
+  cache="${XDG_CACHE_HOME:-$HOME/.cache}/dep-archive"
+fi
+keep="${DEP_ARCHIVE_KEEP:-5}"
+# Zero, a negative number or text would prune the archive that was just built.
+case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+[ "$keep" -ge 1 ] 2>/dev/null || keep=5
+
+comp="${DEP_ARCHIVE_COMPRESSOR:-auto}"
+if [ "$comp" = auto ]; then
+  if command -v zstd >/dev/null 2>&1; then comp=zstd; else comp=gzip; fi
+fi
+case "$comp" in
+  zstd)
+    command -v zstd >/dev/null 2>&1 || die "DEP_ARCHIVE_COMPRESSOR=zstd but zstd is not installed"
+    ext=tar.zst
+    compress() { zstd -q -3 -T0; }
+    decompress() { zstd -q -dc; }
+    ;;
+  gzip)
+    ext=tar.gz
+    compress() { gzip -3; }
+    decompress() { gzip -dc; }
+    ;;
+  *) die "unknown DEP_ARCHIVE_COMPRESSOR: $comp" ;;
+esac
+
+# GNU xargs runs its command once on empty input unless given -r; BSD xargs never
+# does, and newer ones accept -r as a no-op. Probe instead of guessing.
+if printf '' | xargs -r true >/dev/null 2>&1; then xargs_r=-r; else xargs_r=; fi
+
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+
+# find over the tree without descending into node_modules or .git.
+walk() { find . \( -name node_modules -o -name .git \) -prune -o "$@"; }
+
+has_lifecycle() {
+  local f="$1" s
+  for s in $lifecycle; do
+    # Reads the file directly, not a pipe, so -q cannot cause a SIGPIPE.
+    if grep -qE "\"$s\"[[:space:]]*:" "$f"; then return 0; fi
+  done
+  return 1
+}
+
+hash_dir() {
+  find "$1" -type f -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' s; do echo "== $s"; cat "$s"; done
+}
+
+key_inputs() {
+  [ -f "$lockfile" ] || die "no $lockfile in $root"
+  command -v node >/dev/null 2>&1 || die "node is not on PATH"
+  echo "== $lockfile"; cat "$lockfile"
+  local n f d
+  for n in $config_names; do
+    walk -name "$n" -type f -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' f; do echo "== $f"; cat "$f"; done
+  done
+  # The archive also holds what install scripts wrote into node_modules, so the
+  # files a lifecycle script runs count too.
+  walk -name "$manifest_name" -type f -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' f; do
+    echo "== $f"; cat "$f"
+    d="$(dirname "$f")/$script_dir_name"
+    if [ -d "$d" ] && has_lifecycle "$f"; then hash_dir "$d"; fi
+  done
+  for f in $extra_files; do
+    if [ -d "$f" ]; then hash_dir "$f"
+    elif [ -f "$f" ]; then echo "== $f"; cat "$f"
+    else echo "== $f (missing)"
+    fi
+  done
+  echo "node $(node -v) $pm $(pm_version) $(uname -sm) $ext extra=$extra_key"
+}
+
+key() {
+  local k
+  # Command substitution runs in a subshell, so die() there would not stop us.
+  k="$(key_inputs | sha | cut -c1-16)" || exit 2
+  case "$k" in ????????????????) echo "$k" ;; *) die "could not compute the key" ;; esac
+}
+
+# NUL-separated list of the top-level node_modules directories. -prune keeps the
+# nested ones inside them out of the list.
+module_dirs() { find . -path ./.git -prune -o -name node_modules -type d -prune -print0; }
+remove_modules() { module_dirs | xargs -0 $xargs_r rm -rf; }
+
+archive_path() { echo "$cache/$name-$k.$ext"; }
+
+# A symlinked node_modules points into another checkout. Extracting through it, or
+# installing over it, would overwrite that checkout's install.
+refuse_symlinked_modules() {
+  local l
+  # -quit instead of `| head -1`: head exiting early would SIGPIPE find under pipefail.
+  l="$(find . -path ./.git -prune -o -name node_modules -type l -print -quit)"
+  [ -z "$l" ] || die "refusing: $l is a symlink into another checkout; remove it first" 3
+}
+
+restore() {
+  local f; f="$(archive_path)"
+  [ -f "$f" ] || { echo "archive miss: $f"; return 1; }
+  remove_modules
+  if ! decompress < "$f" | tar -xf -; then
+    remove_modules
+    # A full disk fails the extraction too. Only a file that cannot be read back
+    # at all is corrupt, so keep the archive when it decompresses cleanly.
+    if decompress < "$f" > /dev/null 2>&1; then
+      echo "extraction failed but the archive is intact (disk full?): $f" >&2
+    else
+      echo "archive unreadable, discarding: $f" >&2
+      rm -f "$f"
+    fi
+    return 1
+  fi
+  if [ ! -f "$marker" ]; then
+    echo "archive incomplete, discarding: $f" >&2
+    rm -f "$f"; remove_modules
+    return 1
+  fi
+  # npm trusts its hidden lockfile only while it is newer than the directories
+  # around it. Extraction restores the old mtimes, so without this `npm ls` re-reads
+  # the tree and reports problems a fresh install hides.
+  touch "$marker"
+  touch "$f"
+  echo "archive hit: $f"
+}
+
+# The result is stamped so a timer polling often does not decompress a large
+# archive each time. A restore touches the archive, which drops the stamp once.
+verify() {
+  local f stamp; f="$(archive_path)"; stamp="$cache/.ok-$(basename "$f")"
+  [ -f "$f" ] || { echo "archive miss: $f"; return 1; }
+  [ "$stamp" -nt "$f" ] && return 0
+  # No -q on grep: it would stop reading at the first match, tar would die of
+  # SIGPIPE, and pipefail would report a good archive as bad.
+  if decompress < "$f" 2>/dev/null | tar -tf - 2>/dev/null | grep -x "./$marker" > /dev/null; then
+    touch "$stamp"
+  else
+    echo "archive failed verification, discarding: $f" >&2
+    rm -f "$f" "$stamp"
+    return 1
+  fi
+}
+
+prune() {
+  local old
+  # Only this tool's own files: name, a 16-character key, then the extension.
+  # shellcheck disable=SC2012
+  ls -1t "$cache/$name"-????????????????.tar.* 2>/dev/null | tail -n +"$((keep + 1))" |
+    while IFS= read -r old; do rm -f "$old" "$cache/.ok-$(basename "$old")"; done
+}
+
+tmp=""
+cleanup_tmp() { if [ -n "$tmp" ]; then rm -f "$tmp"; fi; }
+
+build() {
+  local f; f="$(archive_path)"
+  mkdir -p "$cache" || die "cannot create $cache"
+  # One build per key. The kernel releases a flock when its process dies, so there
+  # is no stale lock to detect. A second process waits, then restores the archive
+  # the first one built. Hosts without flock skip this.
+  if command -v flock >/dev/null 2>&1; then
+    exec 9> "$cache/.lock-$name-$k"
+    if ! flock -n 9; then
+      echo "another process is building this archive; waiting for it"
+      flock -w "$lock_wait" 9 || echo "gave up waiting; building here" >&2
+      if restore; then return 0; fi
+    fi
+  fi
+  trap cleanup_tmp EXIT
+  # Install scripts run: native binaries finished in postinstall must be in the archive.
+  # shellcheck disable=SC2086
+  $install_cmd || die "install failed: $install_cmd" 4
+  [ -f "$marker" ] || die "install finished without $marker; not archiving" 4
+  tmp="$(mktemp "$cache/.tmp.XXXXXX")" || die "cannot create a temp file in $cache" 4
+  module_dirs | tar --null -T - -cf - | compress > "$tmp" || die "packing failed" 4
+  mv "$tmp" "$f" || die "cannot move the archive into place" 4
+  tmp=""
+  trap - EXIT
+  echo "archive built: $f ($(du -h "$f" | cut -f1))"
+  prune
+}
+
+case "$cmd" in
+  restore|build|ensure) refuse_symlinked_modules ;;
+  key|has|verify) ;;
+  *) usage ;;
+esac
+
+# Computed once: hashing every manifest is the slow part on a large tree.
+k="$(key)"
+
+case "$cmd" in
+  key) echo "$k" ;;
+  has) [ -f "$(archive_path)" ] ;;
+  verify) verify ;;
+  restore) restore ;;
+  build) build ;;
+  ensure) restore || build ;;
+esac

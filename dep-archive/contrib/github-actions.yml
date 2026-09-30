@@ -1,0 +1,29 @@
+# Example job steps. On a self-hosted runner that keeps its disk between jobs, point
+# DEP_ARCHIVE_DIR at a persistent path and skip actions/cache. On hosted runners, let
+# actions/cache carry the archive directory between jobs, keyed on dep-archive's own key.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DEP_ARCHIVE_DIR: ${{ github.workspace }}/../dep-archive-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Get dep-archive
+        run: |
+          git clone --depth 1 "$DEP_ARCHIVE_REPO" "$RUNNER_TEMP/dep-archive"
+          echo "$RUNNER_TEMP/dep-archive/bin" >> "$GITHUB_PATH"
+        env:
+          DEP_ARCHIVE_REPO: https://example.invalid/your/dep-archive.git
+      - name: Compute key
+        id: key
+        run: echo "key=$(dep-archive key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.DEP_ARCHIVE_DIR }}
+          key: dep-archive-${{ steps.key.outputs.key }}
+      - name: Install dependencies
+        run: dep-archive ensure
+      - run: npm test

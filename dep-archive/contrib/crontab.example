@@ -1,0 +1,3 @@
+# Every 15 minutes, for hosts without systemd. flock -n skips a run while the last one
+# is still going; drop it on macOS, where flock is not installed by default.
+*/15 * * * * cd / && flock -n /tmp/dep-archive-refresh.lock env DEP_ARCHIVE_DIR="$HOME/.cache/dep-archive/example" /usr/local/bin/dep-archive-refresh.sh /srv/git/example.git main >> "$HOME/.cache/dep-archive-refresh.log" 2>&1

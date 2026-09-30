@@ -1,0 +1,14 @@
+# Polls the repository every 15 minutes. A poll that finds a verified archive does
+# nothing more. Enable with: systemctl enable --now dep-archive-refresh@<instance>.timer
+
+[Unit]
+Description=Poll %i and refresh its dep-archive
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=90
+Persistent=true
+
+[Install]
+WantedBy=timers.target

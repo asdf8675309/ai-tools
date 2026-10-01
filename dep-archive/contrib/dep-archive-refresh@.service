@@ -1,0 +1,23 @@
+# Keeps a dep-archive built for one repository and branch. One instance per repository:
+#   /etc/dep-archive/<instance>.env   (see example.env next to this file)
+#   systemctl enable --now dep-archive-refresh@<instance>.timer
+# Set User= and Group= to the account that owns the archives and runs the install.
+
+[Unit]
+Description=Refresh the dep-archive for %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=CHANGE_ME
+Group=CHANGE_ME
+WorkingDirectory=/
+EnvironmentFile=/etc/dep-archive/%i.env
+ExecStart=/usr/local/bin/dep-archive-refresh.sh ${REPO} ${BRANCH} ${WORKDIR}
+TimeoutStartSec=1800
+# A cold install next to other work on the host is what this exists to avoid, so
+# the build itself runs at low priority.
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=200%
+MemoryMax=4G

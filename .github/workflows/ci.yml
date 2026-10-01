@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-guards, crucible, crucible/ci, sprint]
+        package: [agent-guards, crucible, crucible/ci, dep-archive, sprint]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -95,6 +95,7 @@ jobs:
           # Found via git rather than a glob, so a script in a new directory is
           # covered the day it lands instead of whenever someone updates a path.
           mapfile -t SCRIPTS < <(git ls-files '*.sh')
+          SCRIPTS+=(dep-archive/bin/dep-archive)
           printf 'linting %d scripts\n' "${#SCRIPTS[@]}"
           for s in "${SCRIPTS[@]}"; do bash -n "$s"; done
           shellcheck --severity=warning "${SCRIPTS[@]}"

@@ -367,14 +367,23 @@ function renderPacketMarkdown(files: PacketFile[], chunkCount: number, redaction
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
+/** Chars per chunk under `--preview`. Only ever applied when explicitly asked for. */
+const PREVIEW_CHUNK_CHARS = 500;
+
 if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
-    console.log("Usage: bun ReviewPacketGenerator.ts [--since <ref>] [--json]");
+    console.log("Usage: bun ReviewPacketGenerator.ts [--since <ref>] [--json] [--preview]");
     process.exit(0);
   }
   const since = flagValue(args, "--since", "origin/main");
   const asJson = args.includes("--json");
+  // Truncation is OPT-IN. Defaulting it on hands every reviewer a fraction of
+  // the real diff and gets a confident, wrong review back — a lens can find
+  // zero issues against a truncated diff and several real ones against the
+  // full text, and the failure is indistinguishable from a clean review.
+  // Default emits everything; `--preview` is for a human skim only.
+  const asPreview = args.includes("--preview");
 
   const packet = await generatePacket({ sinceRef: since });
   if (asJson) {
@@ -382,10 +391,17 @@ if (import.meta.main) {
   } else {
     console.log(packet.markdown);
     console.log("\n\n=== DIFF CHUNKS ===");
+    if (asPreview) {
+      console.log("\n⚠️  --preview: chunks are TRUNCATED. Do not hand this to a reviewer.\n");
+    }
     for (let i = 0; i < packet.diff_chunks.length; i++) {
       const chunk = packet.diff_chunks[i] ?? "";
-      console.log(`\n--- Chunk ${i + 1} / ${packet.diff_chunks.length} ---\n`);
-      console.log(chunk.slice(0, 500) + (chunk.length > 500 ? "\n... [truncated for CLI preview]" : ""));
+      console.log(`\n--- Chunk ${i + 1} / ${packet.diff_chunks.length} (${chunk.length} chars) ---\n`);
+      console.log(
+        asPreview && chunk.length > PREVIEW_CHUNK_CHARS
+          ? `${chunk.slice(0, PREVIEW_CHUNK_CHARS)}\n... [truncated: ${chunk.length - PREVIEW_CHUNK_CHARS} more chars, re-run without --preview]`
+          : chunk,
+      );
     }
   }
 }
